@@ -11,3 +11,15 @@ export function pimlicoUrl(chainId: SupportedChainId): string {
   const network = chainId === 1 ? "ethereum" : "base";
   return `https://api.pimlico.io/v2/${network}/rpc?apikey=${key}`;
 }
+
+/**
+ * Pimlico sponsorship-policy id (the user owns the policy in the Pimlico dashboard; not a secret, but
+ * environment-specific). Passed as `paymasterContext.sponsorshipPolicyId` → `pm_sponsorUserOperation`
+ * params[2]; the paymaster only sponsors gas for ops matching the policy (chain/spend caps live there).
+ */
+export const SPONSORSHIP_POLICY_ID = process.env.PIMLICO_SPONSORSHIP_POLICY_ID ?? "sp_next_micromax";
+
+/** The paymaster context the smart-account client passes to Pimlico for gas sponsorship. */
+export function paymasterContext(): { sponsorshipPolicyId: string } {
+  return { sponsorshipPolicyId: SPONSORSHIP_POLICY_ID };
+}
