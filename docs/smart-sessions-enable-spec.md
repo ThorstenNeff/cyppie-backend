@@ -139,6 +139,29 @@ Reproduzieren: `cd aa-trigger && node scripts/enable-vector.mjs`.
 
 ---
 
+## 3a. Production-Policy-Pins (PIN #4) — echte Rhinestone-Policy-Adressen für `verifyGrant`
+
+Dev-2s `verifyGrant` pinnt, welche Policy-Contracts in einer Session erlaubt sind (gegen getauschte
+Policies). Die echten, **vom SDK tatsächlich emittierten** Adressen (= das, was `getSpendingLimitsPolicy`/
+`getTimeFramePolicy` als `PolicyData.policy` encoden — NICHT die Legacy-`constants.js`-Werte):
+
+| Policy | Adresse | ETH (1) | Base (8453) |
+|---|---|---|---|
+| **Spending-Limits** | `0x000000000033212e272655d8a22402db819477a6` | code ✓ | code ✓ |
+| **Time-Frame** | `0x0000000000D30f611fA3bf652ac6879428586930` | code ✓ | code ✓ |
+
+**Chain-uniform — je EINE Konstante, KEINE `policyFor(chainId)`-Map.** Beide sind CREATE2-deterministisch
+(wie `smartSession` `0x…4bDA`): **dieselbe Adresse trägt deployten Code auf ETH UND Base** (on-chain
+verifiziert). Dev-2 trägt also je eine Konstante ein, gültig für beide Chains.
+
+> ⚠️ **Gotcha:** `@rhinestone/module-sdk` enthält ZWEI Adress-Sätze — die Legacy-`policies/*/constants.js`
+> (`0x00000088D48c…`/`0x81774515…`) und die `GLOBAL_CONSTANTS` (oben). **Emittiert wird der GLOBAL_CONSTANTS-
+> Satz** (geprüft via dem `.policy`-Feld der Getter). Würde Dev-2 die `constants.js`-Werte pinnen, würde
+> `verifyGrant` JEDE echte Session ablehnen. Vergleich case-insensitive (lowercase). Quelle: module-sdk 0.3.1,
+> `GLOBAL_CONSTANTS.{SPENDING_LIMITS,TIME_FRAME}_POLICY_ADDRESS`. (Weitere bei Bedarf: UniversalAction
+> `0x0000000000714Cf48FcF88A0bFBa70d313415032`, UsageLimit `0x00000000001d4479FA2A947026204d0283ceDe4B`,
+> ValueLimit `0x000000000021dC45451291BCDfc9f0B46d6f0278`, Sudo `0x0000000000FEEc8D74e3143fBaBbca515358d869`.)
+
 ## 4. Schnittstelle Backend ↔ Dev-2 (Recompute-Vertrag)
 
 1. Backend liefert das **Grant-Material** (SessionConfig §2 + `account` + `nonce` + chainId).
