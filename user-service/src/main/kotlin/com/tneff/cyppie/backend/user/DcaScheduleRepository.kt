@@ -1,0 +1,93 @@
+package com.tneff.cyppie.backend.user
+
+import java.math.BigInteger
+import java.sql.Timestamp
+import javax.sql.DataSource
+
+data class DcaSchedule(
+    val id: String,
+    val userId: String,
+    val chainId: Long,
+    val account: String,
+    val tokenIn: String,
+    val tokenOut: String,
+    val amountIn: BigInteger,
+    val router: String,
+    val intervalSeconds: Long,
+)
+
+/**
+ * DCA schedule store (PRD-05). The scheduler reads [dueSchedules] and signals a DCA build per due row;
+ * the app signs the userOpHash on-device (Q1). No key material — recurring-buy config only.
+ */
+class DcaScheduleRepository(private val dataSource: DataSource) {
+
+    fun create(
+        userId: String, chainId: Long, account: String, tokenIn: String, tokenOut: String,
+        amountIn: BigInteger, router: String, intervalSeconds: Long, firstRunEpoch: Long,
+    ): String {
+        val sql = """
+            INSERT INTO dca_schedule
+              (user_id, chain_id, account, token_in, token_out, amount_in, router, interval_seconds, next_run_at)
+            VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+        """.trimIndent()
+        dataSource.connection.use { c ->
+            c.prepareStatement(sql).use { ps ->
+                ps.setString(1, userId)
+                ps.setLong(2, chainId)
+                ps.setString(3, account.lowercase())
+                ps.setString(4, tokenIn.lowercase())
+                ps.setString(5, tokenOut.lowercase())
+                ps.setBigDecimal(6, amountIn.toBigDecimal())
+                ps.setString(7, router.lowercase())
+                ps.setLong(8, intervalSeconds)
+                ps.setTimestamp(9, Timestamp(firstRunEpoch * 1000))
+                ps.executeQuery().use { rs -> check(rs.next()); return rs.getString(1) }
+            }
+        }
+    }
+
+    /** Enabled schedules whose next_run_at is due (<= now). The scheduler's hot path. */
+    fun dueSchedules(nowEpoch: Long): List<DcaSchedule> {
+        val sql = """
+            SELECT id, user_id, chain_id, account, token_in, token_out, amount_in, router, interval_seconds
+            FROM dca_schedule
+            WHERE enabled AND next_run_at <= ?
+            ORDER BY next_run_at
+        """.trimIndent()
+        val out = ArrayList<DcaSchedule>()
+        dataSource.connection.use { c ->
+            c.prepareStatement(sql).use { ps ->
+                ps.setTimestamp(1, Timestamp(nowEpoch * 1000))
+                ps.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        out.add(
+                            DcaSchedule(
+                                id = rs.getString(1), userId = rs.getString(2), chainId = rs.getLong(3),
+                                account = rs.getString(4), tokenIn = rs.getString(5), tokenOut = rs.getString(6),
+                                amountIn = rs.getBigDecimal(7).toBigInteger(), router = rs.getString(8),
+                                intervalSeconds = rs.getLong(9),
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /** After a run is signalled: advance next_run_at = now + interval (skip missed slots). */
+    fun markRun(id: String, nowEpoch: Long) {
+        val sql = "UPDATE dca_schedule SET last_run_at = ?, next_run_at = ? + (interval_seconds * interval '1 second') WHERE id = ?::uuid"
+        dataSource.connection.use { c ->
+            c.prepareStatement(sql).use { ps ->
+                val now = Timestamp(nowEpoch * 1000)
+                ps.setTimestamp(1, now)
+                ps.setTimestamp(2, now)
+                ps.setString(3, id)
+                ps.executeUpdate()
+            }
+        }
+    }
+}
