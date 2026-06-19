@@ -30,6 +30,8 @@
     <key>KC_DB_PASSWORD</key>      <string>__SET_ON_HOST__</string>
     <key>KC_HOSTNAME</key>         <string>https://auth.cyppie.example</string>
     <key>KC_HTTP_ENABLED</key>     <string>true</string>
+    <!-- Loopback port 8082 — 8080 is the key-proxy (ADR-0022); both sit behind Caddy on one Mac Mini. -->
+    <key>KC_HTTP_PORT</key>        <string>8082</string>
     <key>KC_PROXY_HEADERS</key>    <string>xforwarded</string>
     <key>KC_HEALTH_ENABLED</key>   <string>true</string>
     <key>KC_BOOTSTRAP_ADMIN_USERNAME</key> <string>__SET_ON_HOST__</string>

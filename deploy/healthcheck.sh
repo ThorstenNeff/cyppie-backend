@@ -4,7 +4,7 @@
 # the SIWE endpoints respond. Exits non-zero if any check fails (usable from monitoring / CI smoke).
 set -uo pipefail
 
-KC_HTTP_PORT="${KC_HTTP_PORT:-8080}"
+KC_HTTP_PORT="${KC_HTTP_PORT:-8082}"   # KC on 8082 (8080 = key-proxy, ADR-0022)
 US_PORT="${USER_SERVICE_PORT:-8081}"
 PG_PREFIX="${PG_PREFIX:-/opt/homebrew/opt/postgresql@16/bin}"
 fail=0

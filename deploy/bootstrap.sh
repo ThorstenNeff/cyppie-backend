@@ -20,7 +20,7 @@ PG_FORMULA="${PG_FORMULA:-postgresql@16}"
 JDK_FORMULA="${JDK_FORMULA:-openjdk@21}"
 DB_USER="${POSTGRES_USER:-cyppie}"
 KC_ADMIN="${KC_ADMIN:-admin}"
-KC_HTTP_PORT="${KC_HTTP_PORT:-8080}"
+KC_HTTP_PORT="${KC_HTTP_PORT:-8082}"   # 8080 is the key-proxy (ADR-0022); KC on 8082, both behind Caddy
 LA_DIR="$HOME/Library/LaunchAgents"
 
 # Required secrets (fail fast if unset).
