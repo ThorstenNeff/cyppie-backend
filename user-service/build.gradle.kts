@@ -26,6 +26,9 @@ dependencies {
     implementation("io.ktor:ktor-serialization-kotlinx-json-jvm:3.5.0")
     implementation("io.ktor:ktor-server-status-pages-jvm:3.5.0")
     implementation("io.ktor:ktor-server-call-logging-jvm:3.5.0")
+    // JWT validation against the Keycloak realm JWKS (RS256) — gates /v1 (ADR-0026 / KAN-137 block 3).
+    implementation("io.ktor:ktor-server-auth-jvm:3.5.0")
+    implementation("io.ktor:ktor-server-auth-jwt-jvm:3.5.0")
     implementation("ch.qos.logback:logback-classic:1.5.34")
 
     testImplementation("io.ktor:ktor-server-test-host-jvm:3.5.0")
