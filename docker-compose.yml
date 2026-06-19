@@ -1,0 +1,91 @@
+# Cyppie Platform Backend — PRD-08 v1 (ADR-0023). Minimal stack on the Oakhost Mac Mini behind the
+# shared Caddy (ADR-0022): Keycloak (auth/SIWE) + Postgres + the Ktor User-Service. The "API gateway"
+# is Caddy itself (forward_auth → Keycloak) running on the host — see caddy/Caddyfile.snippet.
+# Kafka / Redis / ClickHouse / K8s are deferred (PRD-08 §4 / ADR-0023).
+#
+# Runtime: docker-compose, or license-free colima / podman on the Mac Mini
+#   colima start  &&  docker compose up -d        (colima provides a Docker-compatible socket)
+#   podman-compose up -d                           (podman alternative)
+#
+# 🔑 Auth ≠ Custody: this stack holds platform identity only — it NEVER sees wallet seeds/private keys.
+# 🔒 Every secret comes from the host env / a chmod-600 .env (gitignored); nothing is hard-coded here.
+# 🌐 All ports bind to 127.0.0.1 — Caddy is the sole public TLS edge (ADR-0022); nothing else is exposed.
+
+name: cyppie-backend
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro   # bootstraps the keycloak + userservice databases
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    restart: unless-stopped
+    # `start` (production mode) — TLS terminates at Caddy (ADR-0022), so Keycloak runs HTTP behind the
+    # trusted proxy. SIWE is added later as a realm + authenticator (own mini-ADR before the auth build).
+    command: ["start"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER:?}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN:?set KC_ADMIN in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?set KC_ADMIN_PASSWORD in .env}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME: ${KC_HOSTNAME:?set KC_HOSTNAME in .env, e.g. https://auth.cyppie.example}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    healthcheck:
+      # KC images ship no curl; use the bundled JRE to probe the management health endpoint (port 9000).
+      test:
+        - CMD-SHELL
+        - >
+          echo 'public class H{public static void main(String[] a)throws Throwable{
+          System.exit(((java.net.HttpURLConnection)new java.net.URL(a[0]).openConnection())
+          .getResponseCode()==200?0:1);}}' > /tmp/H.java &&
+          java /tmp/H.java http://localhost:9000/health/ready
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  user-service:
+    build:
+      context: ./user-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      USER_SERVICE_PORT: "8081"
+      # DB wiring lands with the schema/Flyway increment; the skeleton boots + serves /health without it.
+      CYPPIE_DB_URL: jdbc:postgresql://postgres:5432/userservice
+      CYPPIE_DB_USER: ${POSTGRES_USER:?}
+      CYPPIE_DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      # OIDC issuer/JWKS for validating Keycloak-issued JWTs — wired with the SIWE/auth increment.
+      CYPPIE_OIDC_ISSUER: ${CYPPIE_OIDC_ISSUER:-}
+    ports:
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  pgdata:

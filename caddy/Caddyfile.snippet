@@ -1,0 +1,45 @@
+# Cyppie Platform-Backend gateway routes (PRD-08 F4 / ADR-0023) — to be MERGED into the existing
+# Oakhost Caddyfile that already fronts the key-proxy (ADR-0022). Same Caddy, SEPARATE routes/processes:
+#
+#   • the key-proxy stays auth-free / read-only on its own path (unchanged here);
+#   • these platform paths are gated by Keycloak-issued JWTs;
+#   • separate rate-limit buckets (different abuse profiles) — see the rate_limit note below.
+#
+# Caddy IS the v1 "API gateway" (no Kong/Envoy). TLS terminates here; upstreams are loopback-only.
+
+# ── Auth (Keycloak) — public OIDC endpoints (token, JWKS, authorize, SIWE challenge) ──
+auth.cyppie.example {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}
+
+# ── Platform API — JWT-enforced edge in front of the User-Service (and future feature services) ──
+api.cyppie.example {
+	encode zstd gzip
+
+	# Validate the Keycloak-issued JWT at the edge. `jwt` is the caddy-jwt module (add to the Caddy
+	# build); it rejects requests without a valid RS256 token signed by the realm's JWKS before they
+	# ever reach an upstream. (Alternative: `forward_auth` to a Keycloak/oauth2-proxy introspection
+	# endpoint — decided in the SIWE-Keycloak mini-ADR alongside the token model.)
+	#
+	# route /v1/* {
+	#   jwt {
+	#     issuer   https://auth.cyppie.example/realms/cyppie
+	#     jwks_url https://auth.cyppie.example/realms/cyppie/protocol/openid-connect/certs
+	#     # rate_limit per-IP/per-subject bucket distinct from the key-proxy bucket
+	#   }
+	#   reverse_proxy 127.0.0.1:8081
+	# }
+
+	# Skeleton (pre-auth): expose only the unauthenticated health probe; /v1/* stays closed until the
+	# JWT layer + SIWE land (own mini-ADR). Flip to the route block above when auth is wired.
+	handle /health {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle {
+		respond "platform API — auth not yet enabled (PRD-08 SIWE pending)" 503
+	}
+}

@@ -1,0 +1,22 @@
+# ── Secrets — NEVER commit (ADR-0021/0022 host-env posture; PRD-08 F6) ──────────────
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+*-realm-export.json   # may contain client secrets; export sanitized only
+
+# ── Gradle / JVM build ──────────────────────────────────────────────────────────────
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+*.class
+
+# ── Container / runtime volumes ───────────────────────────────────────────────────────
+pgdata/
+*.log
+
+# ── OS / editor ───────────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+*.iml
