@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd service for Keycloak (PRD-08 / ADR-0023 launchd-native runtime; replaces the Docker-Compose
+  draft — the Mac Mini is RAM-constrained, ADR-0023 Update 2). Runs the native KC dist (with the SIWE
+  provider baked in via `kc build`) in optimized/production mode behind Caddy (ADR-0022).
+
+  Install: copy to ~/Library/LaunchAgents/ (or /Library/LaunchDaemons for a system service), fill in the
+  absolute paths + host-env secrets, `chmod 600`, then `launchctl load`. See deploy/RUNBOOK.md.
+  🔒 Secrets in this plist live on the host only (chmod 600) — never commit a filled-in copy.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cyppie.keycloak</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/cyppie/keycloak/bin/kc.sh</string>
+    <string>start</string>
+    <string>--optimized</string>
+    <string>--import-realm</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>JAVA_HOME</key>            <string>/opt/homebrew/opt/openjdk@21</string>
+    <key>KC_DB</key>               <string>postgres</string>
+    <key>KC_DB_URL</key>           <string>jdbc:postgresql://localhost:5432/keycloak</string>
+    <key>KC_DB_USERNAME</key>      <string>__SET_ON_HOST__</string>
+    <key>KC_DB_PASSWORD</key>      <string>__SET_ON_HOST__</string>
+    <key>KC_HOSTNAME</key>         <string>https://auth.cyppie.example</string>
+    <key>KC_HTTP_ENABLED</key>     <string>true</string>
+    <key>KC_PROXY_HEADERS</key>    <string>xforwarded</string>
+    <key>KC_HEALTH_ENABLED</key>   <string>true</string>
+    <key>KC_BOOTSTRAP_ADMIN_USERNAME</key> <string>__SET_ON_HOST__</string>
+    <key>KC_BOOTSTRAP_ADMIN_PASSWORD</key> <string>__SET_ON_HOST__</string>
+  </dict>
+
+  <key>RunAtLoad</key>  <true/>
+  <key>KeepAlive</key>  <true/>
+  <key>StandardOutPath</key>   <string>/opt/cyppie/log/keycloak.out.log</string>
+  <key>StandardErrorPath</key> <string>/opt/cyppie/log/keycloak.err.log</string>
+</dict>
+</plist>

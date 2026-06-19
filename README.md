@@ -11,7 +11,7 @@ slices (PRD 04–07) sit behind. **v1 blueprint: [ADR-0023](../Cyppie/docs/adr/0
 
 | Component | Choice | Notes |
 |---|---|---|
-| Runtime | **Docker-Compose** (license-free **colima**/**podman** on the Mac Mini) | Key-proxy stays launchd-native + separate |
+| Runtime | **launchd-native** (RAM-constrained Mac Mini; no Docker — ADR-0023 Update 2) | see `deploy/RUNBOOK.md`; key-proxy already launchd. Cloud-exit re-containerizes (`docker-compose.yml`, deferred) |
 | Auth | **Keycloak** | OIDC/JWT; **SIWE** login (own mini-ADR before the auth build) |
 | API Gateway | **Caddy** (`forward_auth`/JWT → Keycloak) | reuse the existing Caddy; separate routes + rate-limit buckets. No Kong/Envoy in v1 |
 | User-Service | **Ktor / Kotlin-JVM** | consistent with Cyppie `:server` (Kotlin 2.4.0, Ktor 3.5.0) |
@@ -31,18 +31,12 @@ user-service/               Ktor/Kotlin User-Service (Gradle, fat jar + Dockerfi
 HARDENING.md                secrets + hardening runbook (extends the key-proxy posture)
 ```
 
-## Run (local / Mac Mini)
+## Run (Mac Mini — launchd-native)
 
-```bash
-cp .env.example .env && chmod 600 .env     # fill in real secrets (or provide via host env)
-colima start                                # or: ensure Docker/podman is up
-docker compose up -d                        # postgres + keycloak + user-service
-docker compose ps                           # health
-curl localhost:8081/health                  # → {"status":"ok",...}
-```
+Full install/run as persistent launchd services (Postgres + Keycloak + User-Service + Caddy):
+**see [`deploy/RUNBOOK.md`](deploy/RUNBOOK.md)** + the launchd plists under `deploy/launchd/`.
 
-The User-Service alone (skeleton, no DB needed):
-
+The User-Service alone (dev, no DB needed):
 ```bash
 cd user-service && ./gradlew run            # serves :8081  (./gradlew test  ./gradlew buildFatJar)
 ```

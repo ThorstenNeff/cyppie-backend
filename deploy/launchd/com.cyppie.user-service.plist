@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd service for the Cyppie User-Service (PRD-08 / ADR-0023 launchd-native). Runs the Ktor fat jar
+  (build/libs/user-service-all.jar) behind Caddy. JWT-validates Keycloak tokens against the realm JWKS.
+  🔒 Secrets on the host only (chmod 600); never commit a filled-in copy. See deploy/RUNBOOK.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cyppie.user-service</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/opt/openjdk@21/bin/java</string>
+    <string>-jar</string>
+    <string>/opt/cyppie/user-service/user-service-all.jar</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>USER_SERVICE_PORT</key>   <string>8081</string>
+    <key>CYPPIE_OIDC_ISSUER</key>  <string>https://auth.cyppie.example/realms/cyppie</string>
+    <key>CYPPIE_DB_URL</key>       <string>jdbc:postgresql://localhost:5432/userservice</string>
+    <key>CYPPIE_DB_USER</key>      <string>__SET_ON_HOST__</string>
+    <key>CYPPIE_DB_PASSWORD</key>  <string>__SET_ON_HOST__</string>
+  </dict>
+
+  <key>RunAtLoad</key>  <true/>
+  <key>KeepAlive</key>  <true/>
+  <key>StandardOutPath</key>   <string>/opt/cyppie/log/user-service.out.log</string>
+  <key>StandardErrorPath</key> <string>/opt/cyppie/log/user-service.err.log</string>
+</dict>
+</plist>

@@ -1,4 +1,9 @@
-# Cyppie Platform Backend — PRD-08 v1 (ADR-0023). Minimal stack on the Oakhost Mac Mini behind the
+# ⚠️ DEFERRED — NOT the v1 runtime. v1 runs **launchd-native** (deploy/RUNBOOK.md), because the Mac Mini
+# is RAM-constrained and Docker-on-macOS = a heavy colima VM (ADR-0023 Update 2, launchd-native). This
+# compose file is kept as the **cloud-exit artifact**: it re-containerizes the same stack for a future
+# K8s/GCP migration. Paths/secrets are relative to the repo root and would need adjusting for a cloud build.
+#
+# Cyppie Platform Backend — PRD-08 (ADR-0023). Minimal stack on the Oakhost Mac Mini behind the
 # shared Caddy (ADR-0022): Keycloak (auth/SIWE) + Postgres + the Ktor User-Service. The "API gateway"
 # is Caddy itself (forward_auth → Keycloak) running on the host — see caddy/Caddyfile.snippet.
 # Kafka / Redis / ClickHouse / K8s are deferred (PRD-08 §4 / ADR-0023).
