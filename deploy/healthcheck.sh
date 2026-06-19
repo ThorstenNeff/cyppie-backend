@@ -33,5 +33,13 @@ if curl -fsS -o /dev/null "http://localhost:$US_PORT/ready"; then ok "user-servi
 code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$US_PORT/v1/me")"
 if [ "$code" = "401" ]; then ok "/v1/me fail-closed (401 without token)"; else bad "/v1/me not fail-closed (got $code)"; fi
 
+# aa-trigger (PRD-05 AA) — present only when the AA service is deployed (Pimlico key configured)
+AA_PORT="${AA_TRIGGER_PORT:-8090}"
+if curl -fsS -o /dev/null "http://localhost:$AA_PORT/healthz" 2>/dev/null; then
+  ok "aa-trigger /healthz"
+else
+  printf '· aa-trigger not deployed (PRD-05 / no Pimlico key) — skipped\n'
+fi
+
 if [ "$fail" -eq 0 ]; then printf '\033[1;32mAll checks passed.\033[0m\n'; else printf '\033[1;31mHealthcheck FAILED.\033[0m\n'; fi
 exit "$fail"

@@ -36,6 +36,11 @@ preflight() {
   command -v brew >/dev/null || { echo "Homebrew required"; exit 1; }
   brew list "$JDK_FORMULA" >/dev/null 2>&1 || brew install "$JDK_FORMULA"
   brew list "$PG_FORMULA"  >/dev/null 2>&1 || brew install "$PG_FORMULA"
+  # Node is needed only for the AA aa-trigger service (PRD-05); install it when a Pimlico key is present.
+  if [ -n "${PIMLICO_API_KEY:-}" ]; then
+    brew list node >/dev/null 2>&1 || brew install node
+    export NODE_BIN; NODE_BIN="$(brew --prefix node)/bin/node"
+  fi
   export JAVA_HOME; JAVA_HOME="$(brew --prefix "$JDK_FORMULA")"
   export PATH="$(brew --prefix "$PG_FORMULA")/bin:$PATH"
   mkdir -p "$CYPPIE_HOME"/{keycloak,user-service,log}
@@ -78,6 +83,16 @@ setup_user_service() {
   cp "$REPO_DIR"/user-service/build/libs/user-service-all.jar "$CYPPIE_HOME/user-service/"
 }
 
+# ── 3b. aa-trigger (Node AA service) — only when a Pimlico key is configured (PRD-05) ─────────────────
+setup_aa_trigger() {
+  [ -n "${PIMLICO_API_KEY:-}" ] || { log "aa-trigger: skipped (no PIMLICO_API_KEY)"; return; }
+  log "aa-trigger (Node AA service)"
+  ( cd "$REPO_DIR/aa-trigger" && npm ci && npm run build )
+  rm -rf "$CYPPIE_HOME/aa-trigger"
+  mkdir -p "$CYPPIE_HOME/aa-trigger"
+  cp -R "$REPO_DIR"/aa-trigger/dist "$REPO_DIR"/aa-trigger/node_modules "$REPO_DIR"/aa-trigger/package.json "$CYPPIE_HOME/aa-trigger/"
+}
+
 # Render a launchd plist from the template, substituting paths + secrets, into LaunchAgents (chmod 600).
 install_plist() {
   local name="$1"; shift
@@ -85,6 +100,7 @@ install_plist() {
   local out="$LA_DIR/$name.plist"
   sed -e "s#/opt/cyppie#$CYPPIE_HOME#g" \
       -e "s#/opt/homebrew/opt/openjdk@21#$JAVA_HOME#g" \
+      -e "s#/opt/homebrew/opt/node/bin/node#${NODE_BIN:-/opt/homebrew/opt/node/bin/node}#g" \
       -e "s#https://auth.cyppie.example#$KC_HOSTNAME#g" \
       "$REPO_DIR/deploy/launchd/$name.plist" >"$out"
   # Substitute the __SET_ON_HOST__ secret placeholders in order of appearance.
@@ -109,6 +125,8 @@ install_services() {
   install_plist com.cyppie.keycloak "$DB_USER" "$POSTGRES_PASSWORD" "$KC_ADMIN" "$KC_ADMIN_PASSWORD"
   # user-service plist secrets in order: CYPPIE_DB_USER, CYPPIE_DB_PASSWORD.
   install_plist com.cyppie.user-service "$DB_USER" "$POSTGRES_PASSWORD"
+  # aa-trigger (PRD-05) only when a Pimlico key is configured. Secret: PIMLICO_API_KEY.
+  if [ -n "${PIMLICO_API_KEY:-}" ]; then install_plist com.cyppie.aa-trigger "$PIMLICO_API_KEY"; fi
 }
 
 # ── 5. Post-import realm config (VERIFY_PROFILE) ──────────────────────────────────────────────────────
@@ -126,6 +144,7 @@ preflight
 setup_postgres
 setup_keycloak
 setup_user_service
+setup_aa_trigger
 install_services
 bootstrap_realm
 log "Done. Run deploy/healthcheck.sh to verify, and merge caddy/Caddyfile.snippet into the Oakhost Caddy."

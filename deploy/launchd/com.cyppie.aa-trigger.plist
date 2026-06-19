@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd service for the Cyppie aa-trigger (KAN-139 / ADR-0024): the Node/TS AA UserOp service —
+  builds/submits ERC-4337 UserOps via permissionless.js/Pimlico. Loopback :8090; the User-Service is the
+  only caller. 🔑 Holds scoped session keys for Copy/Vaults (Ph2, HSM/KMS) — never the main key.
+  🔒 PIMLICO_API_KEY from host env (chmod 600); never in the repo. See deploy/RUNBOOK.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cyppie.aa-trigger</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/opt/node/bin/node</string>
+    <string>/opt/cyppie/aa-trigger/dist/server.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/cyppie/aa-trigger</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AA_TRIGGER_PORT</key>  <string>8090</string>
+    <key>PIMLICO_API_KEY</key>  <string>__SET_ON_HOST__</string>
+  </dict>
+
+  <key>RunAtLoad</key>  <true/>
+  <key>KeepAlive</key>  <true/>
+  <key>StandardOutPath</key>   <string>/opt/cyppie/log/aa-trigger.out.log</string>
+  <key>StandardErrorPath</key> <string>/opt/cyppie/log/aa-trigger.err.log</string>
+</dict>
+</plist>

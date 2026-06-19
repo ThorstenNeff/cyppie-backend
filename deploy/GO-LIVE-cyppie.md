@@ -104,6 +104,7 @@ curl https://api.cyppie.com/healthz                  # key-proxy up
 | `KC_ADMIN_PASSWORD` | Keycloak bootstrap admin (rotate after 1st login) | `<KC_ADMIN_PASSWORD>` |
 | `KC_HOSTNAME` | Keycloak public URL | `https://auth.cyppie.com` |
 | `alchemyApiKey` / `ALCHEMY_API_KEY` | key-proxy upstream (ADR-0021) | `<ALCHEMY_KEY>` — host env, never repo |
+| `PIMLICO_API_KEY` | aa-trigger AA service (PRD-05; optional) | `<PIMLICO_KEY>` — when set, `bootstrap.sh` also builds + launchd-loads the Node `aa-trigger` on loopback `:8090` (internal; not internet-exposed) |
 
 (Optional overrides: `KC_ADMIN`, `CYPPIE_HOME`, `KC_HTTP_PORT`, `USER_SERVICE_PORT`.)
 
