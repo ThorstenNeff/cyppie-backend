@@ -1,5 +1,5 @@
-import { hashChainSessions, getPermissionId, SmartSessionMode, SMART_SESSIONS_ADDRESS } from '@rhinestone/module-sdk';
-import { hashTypedData } from 'viem';
+import { hashChainSessions, getPermissionId, getOwnableValidator, GLOBAL_CONSTANTS, SmartSessionMode, SMART_SESSIONS_ADDRESS } from '@rhinestone/module-sdk';
+import { hashTypedData, toFunctionSelector } from 'viem';
 
 // ── The EIP-712 type table for the Smart Sessions ENABLE digest (extracted from module-sdk 0.3.1) ──
 const TYPES = {
@@ -94,3 +94,36 @@ for (const [name, session] of [['A-minimal', sessionA], ['B-dca (paymaster=false
   }
 }
 console.log('\nmode(ENABLE) =', SmartSessionMode.ENABLE, '| smartSession(verifyingContract field) =', SMART_SESSIONS_ADDRESS);
+
+// ── Vector D — REAL DCA pin: FULLY real (OwnableValidator + GLOBAL_CONSTANTS policies) + paymaster=true ──
+// THE byte-exact target for Dev-1's app-built enable. A/B/C above used placeholder validator+policy addrs
+// to isolate the typed-data mechanics; D pins every real address. initData = abi.encode(uint256 threshold,
+// address[] owners). NB: use the EMITTED OwnableValidator (getOwnableValidator().address / GLOBAL_CONSTANTS),
+// NOT the top-level OWNABLE_VALIDATOR_ADDRESS export (0x2483DA.. = legacy) — same two-address gotcha as the policies.
+const ov = getOwnableValidator({ threshold: 1, owners: [ACCOUNT] }); // owner = on-device EOA = account (7702 same-addr)
+const sessionD = {
+  account: ACCOUNT,
+  permissions: { permitGenericPolicy: false, permitAdminAccess: false, ignoreSecurityAttestations: false,
+    permitERC4337Paymaster: true,
+    userOpPolicies: [{ policy: GLOBAL_CONSTANTS.SPENDING_LIMITS_POLICY_ADDRESS,
+      initData: '0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000000f4240' }], // USDC, cap 1_000_000
+    erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
+    actions: [{ actionTargetSelector: SWAP_SELECTOR, actionTarget: DEX_ROUTER,
+      actionPolicies: [{ policy: GLOBAL_CONSTANTS.TIME_FRAME_POLICY_ADDRESS,
+        initData: '0x00000000000000000000000000000000000000000000000000000000683f9e8000000000000000000000000000000000000000000000000000000000687a4f00' }] }] },
+  sessionValidator: ov.address,
+  sessionValidatorInitData: ov.initData,
+  salt: SALT, smartSession: SMART_SESSIONS_ADDRESS, nonce: NONCE,
+};
+console.log('\n──────── Vector D — REAL DCA pin (OwnableValidator + real policies + paymaster=true) ────────');
+console.log('sessionValidator (EMITTED OwnableValidator) =', ov.address);
+console.log('sessionValidatorInitData                    =', ov.initData);
+console.log('spendingLimitsPolicy =', GLOBAL_CONSTANTS.SPENDING_LIMITS_POLICY_ADDRESS, '| timeFramePolicy =', GLOBAL_CONSTANTS.TIME_FRAME_POLICY_ADDRESS);
+console.log('permissionId                                =', getPermissionId({ session: sessionD }));
+for (const chainId of [1n, 8453n]) {
+  const d = hashChainSessions([{ chainId, session: sessionD }]);
+  const match = d === rawHash([{ chainId, session: sessionD }]) ? 'MATCH ✓' : 'MISMATCH ✗';
+  console.log(`  chainId=${chainId}: digestToSign = ${d}   (sdk vs raw-viem: ${match})`);
+}
+console.log('\nnonce-getter (read-only via key-proxy): getNonce(bytes32 permissionId, address account) -> uint256');
+console.log('  on SmartSession module', SMART_SESSIONS_ADDRESS, '| selector', toFunctionSelector('getNonce(bytes32,address)'));

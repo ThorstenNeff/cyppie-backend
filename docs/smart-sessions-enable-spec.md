@@ -190,6 +190,57 @@ verifiziert). Dev-2 trägt also je eine Konstante ein, gültig für beide Chains
 > `0x0000000000714Cf48FcF88A0bFBa70d313415032`, UsageLimit `0x00000000001d4479FA2A947026204d0283ceDe4B`,
 > ValueLimit `0x000000000021dC45451291BCDfc9f0B46d6f0278`, Sudo `0x0000000000FEEc8D74e3143fBaBbca515358d869`.)
 
+## 3c. Session-Validator + initData + Nonce-Getter (PIN #5) — für Dev-1s app-gebauten Enable
+
+Die DCA-Session autorisiert den **on-device Owner-Key** (`deriveAddress(0)` = SCA = SIWE-Identität, 7702
+same-address). Validator = Rhinestone **OwnableValidator** (ECDSA, threshold-1-single-owner):
+
+| Feld | Wert |
+|---|---|
+| **`sessionValidator`** (OwnableValidator, gepinnt ETH+Base) | `0x000000000013fdB5234E4E3162a810F54d9f7E98` (on-chain code ✓ ETH+Base, CREATE2-uniform) |
+| **`sessionValidatorInitData`-Layout** | **`abi.encode(uint256 threshold, address[] owners)`** — **NICHT** raw-20B, **nicht** bloß left-padded-Adresse |
+
+initData für DCA (threshold=1, owners=[owner]) = **vier 32-Byte-Worte**:
+```
+0x 0000…0001                                                        // threshold = 1               (uint256)
+   0000…0040                                                        // offset zu owners[] = 0x40    (uint256)
+   0000…0001                                                        // owners.length = 1           (uint256)
+   000000000000000000000000<owner 20B>                              // owner, left-padded auf 32B  (address)
+```
+Beispiel owner=acct0 `0xf39F…2266` → `0x…0001 …0040 …0001 000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266`.
+
+> ⚠️ **Gleicher Zwei-Adressen-Gotcha wie bei den Policies:** **emittiert** wird `getOwnableValidator().address`
+> = `GLOBAL_CONSTANTS.OWNABLE_VALIDATOR_ADDRESS` = `0x…7E98` — **NICHT** der Top-Level-Export
+> `OWNABLE_VALIDATOR_ADDRESS` (`0x2483DA3A…Bf06` = Legacy). Dev-1 pinnt die `0x…7E98`.
+
+**Nonce-Getter** (read-only, über den Key-Proxy-RPC) — der `nonce` im Enable-Digest kommt hier her:
+```
+getNonce(bytes32 permissionId, address account) -> uint256
+  Contract = SmartSession-Modul  0x00000000008bDABA73cD9815d79069c247Eb4bDA   (= das smartSession-Feld)
+  Selector = 0x795f9269   |   stateMutability = view
+  permissionId = keccak256(abi.encode(sessionValidator, sessionValidatorInitData, salt))
+  (live verifiziert: nie-enabled account → 0)
+```
+
+### Vektor D — REAL DCA-Pin (alles echt: OwnableValidator + GLOBAL_CONSTANTS-Policies + paymaster=true)
+
+**Der byte-exakte Pin** für Dev-1s app-gebauten Enable (A/B/C oben nutzten Platzhalter-Validator/-Policies
+zur Encoding-Illustration). `salt` ist app-gewählt (hier `0x…0001`), `nonce=0` (frische Session):
+```
+account                   = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266   (= owner, 7702 same-address)
+sessionValidator          = 0x000000000013fdB5234E4E3162a810F54d9f7E98   (OwnableValidator)
+sessionValidatorInitData  = 0x0000…0001 0000…0040 0000…0001 …f39f…2266   (abi.encode(1,[owner]))
+userOpPolicies[0].policy  = 0x000000000033212e272655d8a22402db819477a6   (SpendingLimits)
+actions[0].actionPolicies[0].policy = 0x0000000000D30f611fA3bf652ac6879428586930   (TimeFrame)
+permitERC4337Paymaster    = true   |   erc7739Policies = { [], [] }   |   salt = 0x…0001   |   nonce = 0
+permissionId              = 0x82bc397553fc6577974c762cd42958d860cd838a55f55f245ee5f6debab698b0
+digestToSign  chainId=1    = 0xba3ebab8845eff4c0f5c2871bdccaecb934b9909049bd36d776386a0390a133a
+digestToSign  chainId=8453 = 0xb45d0bc89f3abd41006eab254dccc8e5d9e206a3e3c180da16dfafb719191ca8
+```
+> SDK `hashChainSessions` == raw-viem `hashTypedData` über die §1-Typtabelle → **MATCH ✓** (beide Chains).
+> Dev-1s app-gebaute Konstruktion muss mit seinem **eigenen** `salt`/`nonce` denselben Encoding-Pfad treffen;
+> mit den obigen literalen `salt=0x…0001`/`nonce=0` muss er exakt diese zwei Digests reproduzieren.
+
 ## 4. Schnittstelle Backend ↔ Dev-2 (Recompute-Vertrag)
 
 1. Backend liefert das **Grant-Material** (SessionConfig §2 + `account` + `nonce` + chainId).
