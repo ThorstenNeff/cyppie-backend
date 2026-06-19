@@ -8,7 +8,7 @@ export const HOST = "127.0.0.1";
 export function pimlicoUrl(chainId: SupportedChainId): string {
   const key = process.env.PIMLICO_API_KEY;
   if (!key) throw new Error("PIMLICO_API_KEY not set");
-  const network = chainId === 1 ? "ethereum" : "base";
+  const network = chainId === 1 ? "ethereum" : chainId === 84532 ? "base-sepolia" : "base";
   return `https://api.pimlico.io/v2/${network}/rpc?apikey=${key}`;
 }
 
