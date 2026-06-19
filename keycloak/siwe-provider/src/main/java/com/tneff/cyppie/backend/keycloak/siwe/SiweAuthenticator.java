@@ -106,9 +106,14 @@ public class SiweAuthenticator implements Authenticator {
         UserModel user = session.users().getUserByUsername(realm, address);
         if (user == null) {
             user = session.users().addUser(realm, address);
-            user.setEnabled(true);
             user.setSingleAttribute(ATTR_WALLET_ADDRESS, address);
         }
+        // A SIWE identity is passwordless and email-less. Idempotently keep it "fully set up" so Keycloak
+        // issues tokens after a valid sign-in: enabled, email marked verified, and no pending required
+        // actions (otherwise the direct-grant fails with "Account is not fully set up").
+        user.setEnabled(true);
+        user.setEmailVerified(true);
+        user.getRequiredActionsStream().toList().forEach(user::removeRequiredAction);
         return user;
     }
 

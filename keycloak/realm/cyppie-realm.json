@@ -1,5 +1,4 @@
 {
-  "_comment": "VERIFY-ON-MAC-MINI DRAFT (ADR-0026/KAN-137). Cyppie realm: a public PKCE client whose Direct-Grant flow is the SIWE authenticator. Imported via `start --import-realm`. The custom-flow binding + authenticatorConfig wiring must be confirmed on a live Keycloak (alias-vs-id resolution on import varies); adjust after the first import.",
   "realm": "cyppie",
   "enabled": true,
   "sslRequired": "external",
@@ -20,12 +19,13 @@
         "pkce.code.challenge.method": "S256"
       },
       "authenticationFlowBindingOverrides": {
-        "direct_grant": "siwe-direct-grant"
+        "direct_grant": "a1f0e000-0000-4000-8000-000000000051"
       }
     }
   ],
   "authenticationFlows": [
     {
+      "id": "a1f0e000-0000-4000-8000-000000000051",
       "alias": "siwe-direct-grant",
       "description": "SIWE (EIP-4361) direct-grant: verify a signed message instead of username/password.",
       "providerId": "basic-flow",
@@ -50,6 +50,17 @@
         "domain": "auth.cyppie.example",
         "chainIds": "1,8453"
       }
+    }
+  ],
+  "requiredActions": [
+    {
+      "alias": "VERIFY_PROFILE",
+      "name": "Verify Profile",
+      "providerId": "VERIFY_PROFILE",
+      "enabled": false,
+      "defaultAction": false,
+      "priority": 90,
+      "config": {}
     }
   ]
 }

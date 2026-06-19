@@ -11,23 +11,39 @@ realm/cyppie-realm.json    cyppie realm: public PKCE client + SIWE direct-grant 
 siwe-provider/             the Gradle provider module (Authenticator-SPI + nonce resource)
 ```
 
-## What is verified vs. pending
+## What is verified
 
-✅ **Verified (headless, no Keycloak needed):**
-- The provider compiles + builds against Keycloak 26.1.0 SPI + `siwe-java` 1.0.8.
-- **SIWE crypto path is unit-tested** (`siwe-provider` `./gradlew test`, 6/6): signature recovery,
-  domain-binding, chain-id binding, nonce match, tampered-sig rejection — against a real web3j-signed
-  EIP-4361 fixture. (This is how the latent `int`/`Long` chain-id bug was caught.)
-- Dependency set pruned (AWS SDK + RPC stack out, 88→44) + **sha256 supply-chain pinned**
-  (`siwe-provider/gradle/verification-metadata.xml`).
+✅ **Unit (headless):** provider compiles/builds vs Keycloak 26.1.0 SPI + `siwe-java` 1.0.8; the SIWE
+crypto path is unit-tested 6/6 (recovery, domain-binding, chain-id, nonce, tampered-sig) against a real
+web3j-signed EIP-4361 fixture — which caught the latent `int`/`Long` chain-id bug. Deps pruned 88→44 +
+sha256 supply-chain pinned.
 
-⛔ **Pending — needs a live Keycloak (the Mac Mini; no container engine in the dev env):**
-1. The image build itself (`kc build`) + provider load.
-2. **BouncyCastle / Jackson dedup**: the collected `providers/` libs still include `bcprov`/`jackson`
-   that overlap Keycloak's bundled versions — confirm no classloader conflict, then drop the duplicates
-   (exclude in `siwe-provider/build.gradle.kts`).
-3. Realm import (the custom direct-grant flow binding + `authenticatorConfig` may need alias→id fixups).
-4. End-to-end SIWE: fetch nonce → sign → token endpoint → JWT.
+✅ **Live — verified natively against Keycloak 26.1.0** (`kc.sh start-dev`, no container engine needed):
+- `kc build` augments cleanly with the provider; both SPIs register (`siwe-authenticator`, `siwe`).
+- **No BouncyCastle/Jackson classloader conflict** — the feared dedup blocker did not materialise. (One
+  cosmetic web3j split-package warning: `org.web3j.crypto`/`utils` span core+crypto+utils jars; harmless,
+  a future prune-refinement.)
+- Realm `cyppie` imports; `GET /realms/cyppie/siwe/nonce` returns a single-use nonce.
+- **Full e2e: nonce → on-device sign → `POST .../token` → a real RS256 JWT** (the SIWE authenticator
+  consumes the nonce single-use, recovers the address, federates the user, KC issues the token).
+
+### ⚠️ Realm setup gotcha (verified) — disable VERIFY_PROFILE
+A wallet identity has no email/name, so Keycloak's default **VERIFY_PROFILE** required action otherwise
+blocks token issuance with `"Account is not fully set up"`. The realm JSON sets it `enabled:false`, **but
+Keycloak's realm import does not honour that for built-in required actions** — disable it post-import
+(idempotent), e.g.:
+```bash
+kcadm.sh config credentials --server "$KC_URL" --realm master --user "$KC_ADMIN" --password "$KC_ADMIN_PASSWORD"
+kcadm.sh update authentication/required-actions/VERIFY_PROFILE -r cyppie -s enabled=false
+```
+(See `bootstrap-realm.sh`.) Other findings the live run fixed: the realm JSON must not contain unknown
+fields (a `_comment` key fails import); the client's `direct_grant` flow binding override needs the
+flow's **id** (not its alias) — the flow carries a fixed `id` referenced by the client.
+
+## Still pending
+- **launchd-native migration** (ADR-0023 re-amend): replace `docker-compose.yml` with launchd plists +
+  native KC/Postgres/User-Service runbook (RAM-constrained Mac Mini; no Docker).
+- **Block 3:** User-Service Postgres/Flyway wiring + JWT validation (Caddy + service) → flip `/v1/me` live.
 
 ## End-to-end flow (once live)
 1. `GET https://auth.cyppie.example/realms/cyppie/siwe/nonce` → `{ "nonce": "…" }` (single-use, 5-min TTL).
