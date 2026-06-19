@@ -241,6 +241,39 @@ digestToSign  chainId=8453 = 0xb45d0bc89f3abd41006eab254dccc8e5d9e206a3e3c180da1
 > Dev-1s app-gebaute Konstruktion muss mit seinem **eigenen** `salt`/`nonce` denselben Encoding-Pfad treffen;
 > mit den obigen literalen `salt=0x…0001`/`nonce=0` muss er exakt diese zwei Digests reproduzieren.
 
+## 3d. ⚠️ N3: Spending-Limit-Cap-Semantik = **KUMULATIV** (`cap = Gesamt-Budget`, nicht per-Buy)
+
+Die Rhinestone **Spending-Limit-Policy erzwingt den `cap` KUMULATIV** — den **Gesamtbetrag über alle
+Uses der Session** (depletierend, **kein** on-chain-Fenster/Reset). **Zwei Quellen, bestätigt:**
+- **On-chain-ABI:** `getPolicyData(...)` liefert `spendingLimit` **+ `alreadySpent`** (laufender Akkumulator)
+  + `approvedAmount` — **kein** Timestamp/Window-Feld ⇒ kumulativ, kein Reset.
+- **Rhinestone-Docs** (Context7): „caps the **cumulative amount** transferable **across all uses** of that
+  function within the session".
+
+**Konsequenzen (ADR-0024-relevant):**
+1. **Exposure pro Token = `cap` → on-chain GEBUNDEN ✓** — „Worst-Case = der Cap" hält **pro Session/Token**.
+2. **`cap = Betrag-pro-Buy` ist FALSCH** — die Session wäre nach **einem** Buy erschöpft (DCA bricht).
+   ⇒ **`cap` MUSS das Gesamt-Budget sein = `perBuy × Anzahl-Buys`** (das Gesamt-Commitment des Users über
+   die Session). **Disclosure muss das als Gesamt-Budget zeigen** (nicht „pro Buy"), damit der signierte
+   on-chain-Bound == dem konsentierten Betrag ist.
+3. **`rollingWindowSeconds` + `usageLimit` sind NICHT in dieser Policy / nicht im Digest** — die Spending-
+   Limit-Policy hat **kein Zeitfenster**. Ein „max X pro rollierende Woche" ist **NICHT on-chain** (nur
+   Backend-Accounting). On-chain-Garantie = rein: kumulativer Total ≤ cap über die Session-Lebenszeit.
+4. **Op-Anzahl on-chain bounden** (optional): die **Usage-Limit-Policy** (`USAGE_LIMIT_POLICY_ADDRESS`
+   `0x00000000001d4479FA2A947026204d0283ceDe4B`, `initData = encodePacked(uint128 limit)`) begrenzt die
+   **Zahl** der Calls. Ohne sie ist die Op-Anzahl unbeschränkt — der **Token-Total** bleibt aber via (1) gecappt.
+
+**Q7-`totalExposureCap` — on-chain oder Backend?**
+- **Pro einzelner DCA-Session:** der Token-Total ist via Spending-Limit-Policy **on-chain gebunden** (cap).
+- **Über MEHRERE Session-Keys eines Users aggregiert** (= Q7): **kein** Off-the-shelf-Policy erzwingt das —
+  jede Policy bindet nur ihre eigene Session. Der **Cross-Session-Aggregat-Cap ist Backend-Accounting
+  (rest-trust)**.
+- **Merge-Gate-Empfehlung:** Ein **einzelner** DCA-Enable braucht **keinen** zusätzlichen on-chain-Total-Cap
+  — die kumulative Spending-Limit-Policy liefert ihn bereits, **vorausgesetzt `cap = Gesamt-Budget`** (Punkt 2,
+  der eigentliche Fix). Der **Cross-Session-Q7-Aggregat** bleibt Backend (rest-trust, konsistent mit ADR-0024-
+  Harm-Reduction, solange jede Session einzeln on-chain gecappt ist). Ein echter on-chain-Aggregat über
+  Sessions bräuchte eine Shared-State-Policy (nicht off-the-shelf) → separat, falls das Produkt es verlangt.
+
 ## 4. Schnittstelle Backend ↔ Dev-2 (Recompute-Vertrag)
 
 1. Backend liefert das **Grant-Material** (SessionConfig §2 + `account` + `nonce` + chainId).
