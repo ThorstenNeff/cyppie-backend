@@ -47,7 +47,7 @@
     {
       "alias": "siwe-config",
       "config": {
-        "domain": "auth.cyppie.example",
+        "domain": "auth.cyppie.com",
         "chainIds": "1,8453"
       }
     }
