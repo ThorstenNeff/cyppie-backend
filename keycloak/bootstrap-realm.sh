@@ -17,5 +17,14 @@ KC_URL="${KC_URL:-http://localhost:8080}"
 KCADM="$KC_HOME/bin/kcadm.sh"
 "$KCADM" config credentials --server "$KC_URL" --realm master --user "$KC_ADMIN" --password "$KC_ADMIN_PASSWORD"
 "$KCADM" update authentication/required-actions/VERIFY_PROFILE -r cyppie -s enabled=false -s defaultAction=false
-
 echo "VERIFY_PROFILE disabled for realm cyppie (SIWE wallet identities are passwordless/profileless)."
+
+# Security (Ph1 review INFO-5b): the ONLY allowed grant_type=password path must be cyppie-app -> the SIWE
+# authenticator flow. The default admin-cli client otherwise exposes a generic ROPC (username/password)
+# surface on the realm's default direct-grant flow. cyppie-realm admin ops go via the MASTER realm, so
+# disable direct-access-grants on the cyppie admin-cli — closing the generic password-grant entirely.
+ADMIN_CLI_ID="$("$KCADM" get clients -r cyppie -q clientId=admin-cli --fields id --format csv --noquotes | tr -d '\r' | tail -1)"
+if [ -n "$ADMIN_CLI_ID" ]; then
+  "$KCADM" update "clients/$ADMIN_CLI_ID" -r cyppie -s directAccessGrantsEnabled=false
+  echo "Generic ROPC closed: admin-cli direct-access-grants disabled (cyppie realm; only cyppie-app -> SIWE remains)."
+fi
