@@ -7,6 +7,17 @@ Ktor fat jar · **Caddy** (already native, ADR-0022). 🔑 Auth ≠ Custody. �
 > The full SIWE auth chain (SIWE → KC JWT → User-Service `/v1/me`) is verified e2e natively — see
 > `keycloak/README.md`. This runbook is how it's installed as persistent launchd services.
 
+## Turnkey (one command)
+
+```bash
+POSTGRES_PASSWORD=… KC_ADMIN_PASSWORD=… KC_HOSTNAME=https://auth.cyppie.example \
+  ./deploy/bootstrap.sh        # idempotent: brew deps, Postgres, KC + SIWE provider + kc build,
+                               # User-Service fat jar, launchd load, realm import + VERIFY_PROFILE
+./deploy/healthcheck.sh        # verify: postgres, realm, SIWE nonce, /v1/me fail-closed
+```
+Then merge `caddy/Caddyfile.snippet` into the Oakhost Caddy. The steps below are the manual reference
+for what `bootstrap.sh` automates / for troubleshooting.
+
 ## 0. Prerequisites
 ```bash
 brew install openjdk@21 postgresql@16
