@@ -42,6 +42,16 @@ dependencies {
         exclude(group = "com.squareup.okhttp3")            // web3j HTTP service — unused (no RPC here)
         exclude(group = "org.web3j", module = "okhttp")    // ditto, web3j's okhttp shim
     }
+
+    // Test only: JUnit 5 + web3j crypto to SIGN a deterministic EIP-4361 fixture (proves the verify path
+    // ecrecovers the right address against a real personal_sign signature, Keycloak-independent).
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
+    testImplementation("org.web3j:crypto:4.12.3")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 // Collect the runtime dependency JARs (siwe-java + transitives) for the Keycloak providers/ directory.

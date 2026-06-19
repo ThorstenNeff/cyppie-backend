@@ -1,7 +1,6 @@
 package com.tneff.cyppie.backend.keycloak.siwe;
 
 import com.moonstoneid.siwe.SiweMessage;
-import com.moonstoneid.siwe.error.SiweException;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
@@ -12,7 +11,6 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -75,32 +73,29 @@ public class SiweAuthenticator implements Authenticator {
         AuthenticatorConfigModel cfg = context.getAuthenticatorConfig();
         String expectedDomain = configValue(cfg, CFG_DOMAIN);
         Set<Long> allowedChains = parseChainIds(configValue(cfg, CFG_CHAIN_IDS));
+        String nonce = siwe.getNonce();
 
-        // 1) Replay protection — the nonce must be one WE issued, unused and unexpired. remove() is the
-        //    atomic single-use op: it returns the stored entry iff present and deletes it (no reuse).
-        Map<String, String> issued = context.getSession().singleUseObjects().remove(nonceKey(siwe.getNonce()));
+        // 1) Replay protection (Keycloak single-use) — the nonce must be one WE issued, unused and
+        //    unexpired. remove() is the atomic single-use op: returns the entry iff present, then deletes
+        //    it (no reuse). This is the part that needs a live Keycloak; the crypto below is unit-tested.
+        Map<String, String> issued = context.getSession().singleUseObjects().remove(nonceKey(nonce));
         if (issued == null) {
             fail(context, "nonce unknown, expired, or already used");
             return;
         }
 
-        // 2) Domain-binding (anti-phishing) + signature recovery + issuedAt/expiration window (siwe-java).
+        // 2) Crypto verification — domain-binding + ecrecover + nonce match + window + chain-id binding.
+        //    Delegated to the pure, unit-tested SiweVerifier (siwe-java under the hood).
+        final SiweVerifier.Result result;
         try {
-            siwe.verify(expectedDomain, siwe.getNonce(), signature);
-        } catch (SiweException e) {
-            fail(context, "SIWE verification failed");
+            result = SiweVerifier.verify(message, signature, expectedDomain, nonce, allowedChains);
+        } catch (SiweVerifier.SiweVerificationException e) {
+            fail(context, e.getMessage());
             return;
         }
 
-        // 3) Chain-ID binding — only configured chains may authenticate (empty config = any).
-        if (!allowedChains.isEmpty() && !allowedChains.contains(siwe.getChainId())) {
-            fail(context, "chainId " + siwe.getChainId() + " not allowed");
-            return;
-        }
-
-        // 4) Federate: the lowercase EVM address IS the platform identity (F1). No key material involved.
-        String address = siwe.getAddress().toLowerCase(Locale.ROOT);
-        UserModel user = findOrCreateUser(context, address);
+        // 3) Federate: the lowercase EVM address IS the platform identity (F1). No key material involved.
+        UserModel user = findOrCreateUser(context, result.address());
         context.setUser(user);
         context.success();
     }
