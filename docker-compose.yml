@@ -33,11 +33,18 @@ services:
       - "127.0.0.1:5432:5432"
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.1
+    # Custom image (ADR-0026/KAN-137): the stock Keycloak 26.1 + the baked-in SIWE Authenticator-SPI
+    # provider (see keycloak/Dockerfile, `kc build`). ⚠️ verify-on-Mac-Mini: the image build + provider
+    # classloader + realm import are not verified headlessly (no container engine in dev).
+    build:
+      context: ./keycloak
     restart: unless-stopped
-    # `start` (production mode) — TLS terminates at Caddy (ADR-0022), so Keycloak runs HTTP behind the
-    # trusted proxy. SIWE is added later as a realm + authenticator (own mini-ADR before the auth build).
-    command: ["start"]
+    # `start --optimized` (production mode; kc build already ran in the image) — TLS terminates at Caddy
+    # (ADR-0022), so Keycloak runs HTTP behind the trusted proxy. `--import-realm` loads the cyppie realm
+    # (public PKCE client + SIWE direct-grant flow) from /opt/keycloak/data/import on first start.
+    command: ["start", "--optimized", "--import-realm"]
+    volumes:
+      - ./keycloak/realm:/opt/keycloak/data/import:ro
     depends_on:
       postgres:
         condition: service_healthy
