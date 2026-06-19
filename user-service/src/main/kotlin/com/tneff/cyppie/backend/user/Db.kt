@@ -11,7 +11,10 @@ import javax.sql.DataSource
 class Db(val dataSource: DataSource) {
 
     /** Ordered schema migrations: version -> classpath SQL resource. Append-only. */
-    private val migrations = listOf(1 to "db/migration/V1__init.sql")
+    private val migrations = listOf(
+        1 to "db/migration/V1__init.sql",
+        2 to "db/migration/V2__aa_sessions.sql",
+    )
 
     /**
      * Minimal, packaging-robust migration runner: records applied versions in `schema_version` and runs
