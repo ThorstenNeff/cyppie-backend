@@ -34,7 +34,14 @@ dependencies {
     compileOnly("jakarta.ws.rs:jakarta.ws.rs-api:3.1.0")
 
     // SIWE / EIP-4361 verification — bundled into providers/ (see copyProviderLibs).
-    implementation("com.moonstoneid:siwe-java:1.0.8")
+    // Aggressively prune web3j's transitives we never touch (we only parse + ecrecover, never sign or
+    // make RPC calls): the entire AWS SDK (web3j's KMS signing path) and the HTTP/RPC stack. This shrinks
+    // the auth-image attack surface and the supply-chain set the PO wants pinned/verified.
+    implementation("com.moonstoneid:siwe-java:1.0.8") {
+        exclude(group = "software.amazon.awssdk")          // AWS KMS tx-signing — unused (verify-only)
+        exclude(group = "com.squareup.okhttp3")            // web3j HTTP service — unused (no RPC here)
+        exclude(group = "org.web3j", module = "okhttp")    // ditto, web3j's okhttp shim
+    }
 }
 
 // Collect the runtime dependency JARs (siwe-java + transitives) for the Keycloak providers/ directory.
