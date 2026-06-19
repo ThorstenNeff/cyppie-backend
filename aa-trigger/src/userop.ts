@@ -1,4 +1,4 @@
-import { createPublicClient, http, type Address, type Hex } from "viem";
+import { createPublicClient, http, hashMessage, type Address, type Hex } from "viem";
 import { CHAINS, type SupportedChainId } from "./addresses.js";
 
 export function publicClientFor(chainId: SupportedChainId) {
@@ -25,15 +25,23 @@ export async function isUpgraded(chainId: SupportedChainId, owner: Address): Pro
 }
 
 /**
- * Wrap the app's raw 65-byte ECDSA signature (over the userOpHash) into Kernel's validator envelope
- * (the format Kernel's root/ECDSA validator recovers from). Dev-1's app only ever produces the raw
- * 65-byte; the exact envelope bytes are LOCKED in the live pass by comparing this against
- * permissionless.js `account.signUserOperation` on a deterministic dummy op (no Pimlico needed for that
- * comparison — the userOpHash + signing are deterministic). Until locked, this is the passthrough shape.
+ * 🔒 The exact digest Dev-1's app must raw-sign on-device (KERNEL-WRAPPING-LOCK, verified on Base Sepolia
+ * against permissionless.js `account.signUserOperation`). Kernel's 7702 root/ECDSA validator recovers from
+ * the **EIP-191 (`hashMessage`) form of the userOpHash** — NOT the raw userOpHash. So the aa-trigger returns
+ * `digestToSign(userOpHash)` and the app raw-secp256k1-signs THAT 32-byte digest → 65-byte r‖s‖v.
  */
-export function wrapKernelSignature(rawSignature: Hex): Hex {
-  // TODO(live-pass): lock the exact Kernel v3/7702 root-validator envelope vs permissionless.signUserOperation.
-  return rawSignature;
+export function digestToSign(userOpHash: Hex): Hex {
+  return hashMessage({ raw: userOpHash });
+}
+
+/**
+ * Wrap the app's raw 65-byte signature into Kernel's userOp signature. VERIFIED passthrough: with the
+ * digest above ({@link digestToSign}), the 65-byte ECDSA signature IS the final `userOp.signature` — the
+ * Kernel root validator adds no envelope bytes (refSig from permissionless is exactly 65 bytes). The
+ * "wrapping" lives entirely in the EIP-191 digest, not the signature.
+ */
+export function wrapKernelSignature(rawSignatureOverDigest: Hex): Hex {
+  return rawSignatureOverDigest;
 }
 
 export interface DcaAction {
