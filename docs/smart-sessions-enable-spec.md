@@ -128,8 +128,36 @@ permissionId               = 0xb6fab81ecda7453b12cafad20272ddf52459013a0e78f92e1
 digestToSign  chainId=1    = 0x4b7fe8e3ab2cf1929e70dda85aee35b48a005ce95a0d73a94f2221351ce62632
 digestToSign  chainId=8453 = 0x612b0831cbca241f4726678f3f8a17db5de2eb6838447f416514b635331b9ddd
 ```
-> `permissionId` ist in A==B identisch (hängt nur an sessionValidator/initData/salt — die hier gleich sind).
+**Vektor C — DCA SPONSORED** (identisch zu B, aber **`permitERC4337Paymaster = true`**) = der **echte
+DCA-Enable** (Pimlico-Sponsoring). Das ist der zu pinnende Real-Vektor:
+```
+permitERC4337Paymaster     = true              // erc7739Policies weiterhin { [], [] }
+permissionId               = 0xb6fab81ecda7453b12cafad20272ddf52459013a0e78f92e1ee528313ec20553
+digestToSign  chainId=1    = 0x3829dee4858a5943584350f109b100cd6e8a6c1a17bc94fcf45d0357bc0c4d39
+digestToSign  chainId=8453 = 0xe85a3ea587b69870b1584e165e4b700d6e5c89fd0ddf2e56e56a4ecc31ebe320
+```
+> `permissionId` ist in A==B==C identisch (hängt nur an sessionValidator/initData/salt — die hier gleich sind).
 > `chainId` ändert den Digest (1 vs 8453 verschieden) → bestätigt die Chain-Bindung über `ChainSession.chainId`.
+> **B vs C verschieden** (`0x4b7fe8e3…` vs `0x3829dee4…`) → der `permitERC4337Paymaster`-Flip ändert den Digest
+> ⇒ dieses Feld **muss** im disclosed Material stehen + gemappt werden, sonst weicht der Recompute ab.
+
+### ⚠️ MED-2: die zwei `SignedPermissions`-Felder `permitERC4337Paymaster` + `erc7739Policies`
+
+Beide sind **Pflichtfelder** des `Session`-Typs (`@rhinestone/module-sdk`, **kein SDK-Default**) und gehen
+**in den signierten Digest** ein. Defaultet die App sie (false / leer), während das Backend andere Werte
+encodet, **weicht der Recompute ab → `verifyGrant` lehnt JEDEN ehrlichen Grant ab.** Daher:
+
+1. **Disclosure-Pflicht:** das Grant-Material **muss beide Felder explizit liefern** — `toSigned()` mappt
+   sie aus dem disclosed Material, defaultet sie **nie**.
+2. **Kanonische DCA-Werte:**
+   - **`permitERC4337Paymaster = true`** — DCA-Ops sind **Pimlico-gesponsert**; die Session **muss** den
+     ERC-4337-Paymaster erlauben, sonst wird der gesponserte UserOp bei der Session-Validierung abgelehnt
+     (Rhinestone Smart Sessions, ERC-4337+Pimlico bestätigt via Context7).
+   - **`erc7739Policies = { allowedERC7739Content: [], erc1271Policies: [] }`** (leer) — DCA nutzt **kein**
+     ERC-1271/ERC-7739-Content-Signing in der Session. (Leere Tuple-Arrays, NICHT weglassen — das Feld ist
+     Teil des Hash-Encodings.)
+3. **Pin-Vektor:** Vektor **C** oben (paymaster=true, erc7739 leer) — Dev-1/Dev-2 müssen genau diese 2
+   Digests reproduzieren.
 
 **Verifikations-Gate (im Script geprüft):** SDK-`hashChainSessions` == raw-viem-`hashTypedData(domain,types,…)`
 für alle vier Digests **MATCH ✓** — d.h. die Typ-Tabelle in §1 ist genau die, die den Digest erzeugt.

@@ -49,12 +49,15 @@ const SESSION_KEY_INITDATA = '0x000000000000000000000000cafecafecafecafecafecafe
 const SALT = '0x0000000000000000000000000000000000000000000000000000000000000001';
 const NONCE = 0n;
 
-function buildSession(actions, userOpPolicies) {
+// permitERC4337Paymaster: MUST be true for a Pimlico-sponsored DCA op (the session has to permit a
+// paymaster, else the sponsored userOp is rejected at session validation). erc7739Policies: empty for DCA
+// (no ERC-1271/ERC-7739 content-signing in the session). BOTH are in the signed digest — disclose+map them.
+function buildSession(actions, userOpPolicies, permitERC4337Paymaster = false) {
   return {
     account: ACCOUNT,
     permissions: {
       permitGenericPolicy: false, permitAdminAccess: false,
-      ignoreSecurityAttestations: false, permitERC4337Paymaster: false,
+      ignoreSecurityAttestations: false, permitERC4337Paymaster,
       userOpPolicies, erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] }, actions,
     },
     sessionValidator: SESSION_VALIDATOR,
@@ -72,13 +75,14 @@ const SPENDING_LIMIT_POLICY = '0x0000000000000000000000000000000000000511';
 const TIMEFRAME_POLICY = '0x0000000000000000000000000000000000000522';
 const DEX_ROUTER = '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45'; // Uniswap V3 router (example target)
 const SWAP_SELECTOR = '0x5ae401dc'; // multicall(uint256,bytes[])
-const sessionB = buildSession(
-  [{ actionTargetSelector: SWAP_SELECTOR, actionTarget: DEX_ROUTER,
-     actionPolicies: [{ policy: TIMEFRAME_POLICY, initData: '0x00000000000000000000000000000000000000000000000000000000683f9e8000000000000000000000000000000000000000000000000000000000687a4f00' }] }],
-  [{ policy: SPENDING_LIMIT_POLICY, initData: '0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000000f4240' }],
-);
+const dcaActions = [{ actionTargetSelector: SWAP_SELECTOR, actionTarget: DEX_ROUTER,
+     actionPolicies: [{ policy: TIMEFRAME_POLICY, initData: '0x00000000000000000000000000000000000000000000000000000000683f9e8000000000000000000000000000000000000000000000000000000000687a4f00' }] }];
+const dcaUserOpPolicies = [{ policy: SPENDING_LIMIT_POLICY, initData: '0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb4800000000000000000000000000000000000000000000000000000000000f4240' }];
+const sessionB = buildSession(dcaActions, dcaUserOpPolicies, false);
+// Vector C — DCA SPONSORED: identical to B but permitERC4337Paymaster=true (the real DCA enable w/ Pimlico).
+const sessionC = buildSession(dcaActions, dcaUserOpPolicies, true);
 
-for (const [name, session] of [['A-minimal', sessionA], ['B-dca', sessionB]]) {
+for (const [name, session] of [['A-minimal', sessionA], ['B-dca (paymaster=false)', sessionB], ['C-dca-sponsored (paymaster=true)', sessionC]]) {
   console.log(`\n──────── Vector ${name} ────────`);
   console.log('permissionId =', getPermissionId({ session }));
   for (const chainId of [1n, 8453n]) {
