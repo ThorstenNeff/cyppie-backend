@@ -45,7 +45,13 @@ data class HealthStatus(val status: String, val service: String = "user-service"
 data class ApiError(val error: String)
 
 @Serializable
-data class MeResponse(val walletAddress: String, val subject: String)
+data class MeResponse(
+    val walletAddress: String,
+    val subject: String,
+    val email: String? = null,
+    val displayName: String? = null,
+    val persisted: Boolean = false,
+)
 
 private const val JWT_PROVIDER = "cyppie-jwt"
 
@@ -81,17 +87,32 @@ fun Application.userServiceModule() {
         }
     }
 
+    // Optional Postgres profile store (PRD-08 §3). Absent → /v1/me echoes the verified token identity.
+    val db = Db.fromEnv()
+    db?.migrate()
+    val profiles = db?.let { ProfileRepository(it.dataSource) }
+
     routing {
         get("/health") { call.respond(HealthStatus("ok")) }   // liveness
-        get("/ready") { call.respond(HealthStatus("ready")) }  // readiness (adds DB check once wired)
+        get("/ready") {                                        // readiness (DB-aware)
+            val ok = db?.healthy() ?: true
+            if (ok) call.respond(HealthStatus("ready"))
+            else call.respond(HttpStatusCode.ServiceUnavailable, HealthStatus("db-unavailable"))
+        }
 
         if (issuer != null) {
             authenticate(JWT_PROVIDER) {
                 get("/v1/me") {
                     val principal = call.principal<JWTPrincipal>()!!
-                    val address = principal.payload.getClaim("preferred_username").asString()
-                        ?: principal.payload.subject
-                    call.respond(MeResponse(walletAddress = address, subject = principal.payload.subject))
+                    val subject = principal.payload.subject
+                    val address = principal.payload.getClaim("preferred_username").asString() ?: subject
+                    if (profiles != null) {
+                        // First sign-in creates the profile; subsequent ones link the current KC subject.
+                        val p = profiles.upsertAndGet(address, subject)
+                        call.respond(MeResponse(p.walletAddress, subject, p.email, p.displayName, persisted = true))
+                    } else {
+                        call.respond(MeResponse(address, subject))
+                    }
                 }
             }
         } else {

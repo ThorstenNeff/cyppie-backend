@@ -29,6 +29,10 @@ dependencies {
     // JWT validation against the Keycloak realm JWKS (RS256) — gates /v1 (ADR-0026 / KAN-137 block 3).
     implementation("io.ktor:ktor-server-auth-jvm:3.5.0")
     implementation("io.ktor:ktor-server-auth-jwt-jvm:3.5.0")
+    // Postgres profile persistence (PRD-08 §3): HikariCP pool + JDBC driver (migrations run via a small
+    // packaging-robust runner in Db.kt — Flyway's scanner mis-reads resources inside the shadow/fat jar).
+    implementation("com.zaxxer:HikariCP:6.2.1")
+    implementation("org.postgresql:postgresql:42.7.4")
     implementation("ch.qos.logback:logback-classic:1.5.34")
 
     testImplementation("io.ktor:ktor-server-test-host-jvm:3.5.0")
