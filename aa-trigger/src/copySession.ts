@@ -37,32 +37,45 @@ export interface EnableInputs {
   sessionValidatorInitData: Hex; // abi.encode(1, [sessionPublicKey])
   salt: Hex; // backend-generated, makes the permissionId unique per session
   userOpPolicies: { policy: Address; initData: Hex }[]; // [TimeFrame window] (IUserOpPolicy)
-  actions: { actionTargetSelector: Hex; actionTarget: Address; actionPolicies: { policy: Address; initData: Hex }[] }[]; // [router+selector, [SpendingLimits cap]] (IActionPolicy)
+  actions: { actionTargetSelector: Hex; actionTarget: Address; actionPolicies: { policy: Address; initData: Hex }[] }[]; // [token.approve→[SpendingLimits cap], router.swap→[TimeFrame]]
   erc7739Policies: { allowedERC7739Content: never[]; erc1271Policies: never[] };
   permitERC4337Paymaster: true;
   permissionId: Hex;
   smartSession: Address;
 }
 
+/** ERC-20 `approve(address,uint256)` selector — the action the spend cap is enforced on. */
+const APPROVE_SELECTOR: Hex = "0x095ea7b3";
+
 /**
  * Assemble the canonical ENABLE inputs for a session key + scope (pure; the byte-exact target for the app).
  *
- * Policy placement (C3 on-chain finding, proven on Base Sepolia): the SpendingLimitsPolicy implements only
- * `IActionPolicy`, so SmartSession rejects it in the `userOpPolicies` slot (UnsupportedPolicy 0x6a01dd01). The
- * spend cap belongs on the scoped router ACTION; the TimeFrame window goes in `userOpPolicies` (it implements
- * `IUserOpPolicy`). Both layouts were enabled + USE-validated on-chain (mirror receipts in the C3 lock report).
+ * Policy placement (C3 on-chain finding, proven on Base Sepolia — enable + USE-mode receipts):
+ *  - SpendingLimitsPolicy implements only `IActionPolicy` AND its `checkAction` parses an ERC-20
+ *    transfer/approve on the action TARGET (the token). So it is rejected in `userOpPolicies`
+ *    (UnsupportedPolicy 0x6a01dd01) AND reverts at USE on a non-token action like a router multicall
+ *    (PolicyViolation 0x3b577361). The cap therefore sits as the ACTION policy on the spend-TOKEN's
+ *    `approve` — capping what the router can pull (the account's own spend authorization).
+ *  - The TimeFrame WINDOW goes in `userOpPolicies` (it implements `IUserOpPolicy`); the swap is a SEPARATE
+ *    time-boxed router action. Two actions: [token.approve (cap), router.swap (window)].
  */
 export function assembleEnableInputs(sessionPublicKey: Address, salt: Hex, scope: CopyScope): EnableInputs {
   const ov = getOwnableValidator({ threshold: 1, owners: [sessionPublicKey] });
   const spend = getSpendingLimitsPolicy([{ token: scope.token, limit: scope.capTotalBudget }]);
   const time = getTimeFramePolicy({ validAfter: scope.windowStart, validUntil: scope.windowEnd });
+  const timePolicy = { policy: time.policy as Address, initData: time.initData as Hex };
   const session = {
     sessionValidator: ov.address as Address,
     sessionValidatorInitData: ov.initData as Hex,
     salt,
-    userOpPolicies: [{ policy: time.policy as Address, initData: time.initData as Hex }], // TimeFrame (IUserOpPolicy): the window
+    userOpPolicies: [timePolicy], // TimeFrame (IUserOpPolicy): the window
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
-    actions: [{ actionTargetSelector: scope.selector, actionTarget: scope.router, actionPolicies: [{ policy: spend.policy as Address, initData: spend.initData as Hex }] }], // SpendingLimits (IActionPolicy): the cap, on the router action
+    actions: [
+      // cap: SpendingLimits on the spend-token approve (IActionPolicy) — caps what the router can pull
+      { actionTargetSelector: APPROVE_SELECTOR, actionTarget: scope.token, actionPolicies: [{ policy: spend.policy as Address, initData: spend.initData as Hex }] },
+      // swap: the copy-router call, time-boxed (separate action)
+      { actionTargetSelector: scope.selector, actionTarget: scope.router, actionPolicies: [timePolicy] },
+    ],
     permitERC4337Paymaster: true as const,
     chainId: BigInt(scope.chainId),
   };

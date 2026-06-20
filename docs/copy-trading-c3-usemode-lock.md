@@ -7,10 +7,11 @@
 
 ## Proof (on-chain, Base Sepolia)
 
-| Layout | op1 install+enable (owner-signed) | op2 USE-mode mirror (session-key-signed) |
-|---|---|---|
-| `sudo`  (isolates the lock) | `0x924c6853…f43bf4` ✓ | **`0x877f603afaca03dbaf62134608bd270a0e5ba93fc05757a40bfc1bd05de74a4b`** ✓ blk 43083007 |
-| `prod`  (real copy scope)   | `0x8c9351fb…2f42` ✓   | **`0xb410b43b0bbb97bc2fce719aec65446600cbb8e3ffd7f564cbd96bc66c138903`** ✓ blk 43083056 |
+| Layout | op2 USE-mode mirror (session-key-signed) — Base Sepolia |
+|---|---|
+| `sudo` (Sudo policies — isolates the lock) | **`0x877f603afaca03dbaf62134608bd270a0e5ba93fc05757a40bfc1bd05de74a4b`** ✓ blk 43083007 |
+| `prod` (TimeFrame userOp + SpendingLimits on token transfer) | **`0xb410b43b0bbb97bc2fce719aec65446600cbb8e3ffd7f564cbd96bc66c138903`** ✓ blk 43083056 |
+| `dca`  (two-action: SpendingLimits on token **approve** + time-boxed swap) | **`0xc19e5e42811b701941375ebe8bfab3091a515fb4b17736b81f1a67e67e9db63d`** ✓ blk 43083468 |
 
 Each run uses a FRESH follower owner EOA + a FRESH backend session key. The session key is the ONLY signer of
 op2 — the owner/main key never signs the mirror (Auth ≠ Custody). op1 (install Smart Sessions + enable the
@@ -31,18 +32,27 @@ OwnableValidator signature and packed USE-mode (`0x00 ‖ permissionId ‖ ownab
   `copysession.test.mjs` (recovers the session key over raw, NOT over EIP-191). The signer is the C1
   `SessionKeySigner` (EIP-2 low-S), so the YubiHSM2 drop-in is unchanged.
 
-## Policy placement — C2 correctness fix (on-chain finding)
+## Policy placement — correctness fix for BOTH copy AND DCA (on-chain finding)
 
-The `SpendingLimitsPolicy` implements **only `IActionPolicy`** → SmartSession rejects it in the `userOpPolicies`
-slot (`UnsupportedPolicy 0x6a01dd01`). Corrected in `assembleEnableInputs` (`copySession.ts`):
+The `SpendingLimitsPolicy` implements **only `IActionPolicy`** AND its `checkAction(id, account, target, value,
+callData)` parses an **ERC-20 transfer/approve on the action TARGET (the token)** — `getPolicyData` returns
+`spendingLimit / alreadySpent / approvedAmount`. Two consequences, both proven on-chain:
 
-- **`userOpPolicies` = [TimeFrame]** (window; `IUserOpPolicy`).
-- **action `[router+selector]` policies = [SpendingLimits]** (the cumulative cap = total budget, N3; `IActionPolicy`).
+1. It is **rejected in the `userOpPolicies` slot** (`UnsupportedPolicy 0x6a01dd01`) — where the original copy
+   `assembleEnableInputs` **and** the DCA enable-vectors (B/C/D) put it.
+2. On a **non-token action** (a DEX router multicall, or `WETH.deposit()`) it reverts at USE with
+   `PolicyViolation 0x3b577361` — so it cannot cap a router swap directly.
 
-Both placements enable + USE-validate on-chain (the `prod` receipt). The cap is actively enforced (a
-non-matching call reverts `PolicyViolation 0x3b577361`). The DCA enable-spec (`smart-sessions-enable-spec.md`
-PIN#4 / Vector D) put SpendingLimits as a userOpPolicy — that is digest-valid but **on-chain-invalid**; the
-app-built enable for copy (and DCA, if it adds a spend cap) must use the action-policy placement.
+**Correct shape (copy + DCA), proven on-chain (enable + USE receipts):**
+- **`userOpPolicies` = [TimeFrame]** (the window; `IUserOpPolicy`).
+- **two actions:** `token.approve` → **[SpendingLimits cap]** (caps what the router can pull = the account's
+  own spend authorization; cumulative cap = total budget, N3) **+** `router.swap` → **[TimeFrame]** (time-boxed).
+
+Applied to `assembleEnableInputs` (`copySession.ts`) and the DCA enable-vectors (`scripts/enable-vector.mjs`
+B/C/D, regenerated — Vector D digests changed; permissionId stable since it depends only on validator+salt).
+The DCA-enable-spec (`smart-sessions-enable-spec.md` PIN#4) cap-placement is corrected the same way → KAN-150
+(app-side fix Dev-1/Dev-2). `prod` (cap on token transfer) and `dca` (cap on token approve + swap) receipts both
+land; the cap is actively enforced (PolicyViolation on a non-matching call).
 
 ## Kernel v3.3 integration gotchas (for C4 — the `/v1/session/trigger` USE path)
 

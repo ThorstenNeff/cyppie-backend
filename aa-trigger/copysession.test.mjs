@@ -42,11 +42,15 @@ console.log("C2: assembleEnableInputs -> byte-exact, app-reproducible ENABLE dig
 const inputs = assembleEnableInputs(SESSION_PUBKEY, SALT, scope);
 ok(inputs.permitERC4337Paymaster === true, "permitERC4337Paymaster=true (sponsored, N3/MED-2)");
 ok(inputs.sessionValidator.toLowerCase() === "0x000000000013fdb5234e4e3162a810f54d9f7e98", "sessionValidator = OwnableValidator (GLOBAL_CONSTANTS)");
-// C3 policy placement (on-chain finding): TimeFrame in userOpPolicies (IUserOpPolicy), SpendingLimits on the
-// action (IActionPolicy). SpendingLimits in userOpPolicies is rejected on-chain (UnsupportedPolicy).
+// C3 policy placement (on-chain finding): TimeFrame in userOpPolicies (IUserOpPolicy); SpendingLimits is an
+// IActionPolicy that parses an ERC-20 transfer/approve → the cap sits on the spend-TOKEN's approve action, and
+// the router swap is a SEPARATE time-boxed action. SpendingLimits in userOpPolicies / on the router reverts.
 ok(inputs.userOpPolicies[0].policy.toLowerCase() === "0x0000000000d30f611fa3bf652ac6879428586930", "TimeFrame = userOp policy (GLOBAL_CONSTANTS)");
-ok(inputs.actions[0].actionPolicies[0].policy.toLowerCase() === "0x000000000033212e272655d8a22402db819477a6", "SpendingLimits = action policy (GLOBAL_CONSTANTS)");
-ok(inputs.actions[0].actionTarget.toLowerCase() === scope.router.toLowerCase(), "action scoped to the copy router");
+ok(inputs.actions.length === 2, "two actions: [token.approve cap, router.swap window]");
+ok(inputs.actions[0].actionTargetSelector === "0x095ea7b3" && inputs.actions[0].actionTarget.toLowerCase() === scope.token.toLowerCase(), "cap action = approve on the spend token");
+ok(inputs.actions[0].actionPolicies[0].policy.toLowerCase() === "0x000000000033212e272655d8a22402db819477a6", "SpendingLimits = the cap action policy (GLOBAL_CONSTANTS)");
+ok(inputs.actions[1].actionTarget.toLowerCase() === scope.router.toLowerCase() && inputs.actions[1].actionTargetSelector === scope.selector, "swap action = the copy router/selector");
+ok(inputs.actions[1].actionPolicies[0].policy.toLowerCase() === "0x0000000000d30f611fa3bf652ac6879428586930", "TimeFrame = the swap action window");
 
 // Build the full SignedSession the app would build (owner + nonce) and recompute both ways.
 const signedSession = {

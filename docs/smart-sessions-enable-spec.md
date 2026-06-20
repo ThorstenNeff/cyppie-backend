@@ -96,6 +96,18 @@ Antwort. (Backend-Ref: `aa-trigger/src/userop.ts` → `sca7702Address(owner) = o
 
 ## 3. Referenz-Vektoren (PIN #2) — bekannte SessionConfig → erwarteter `digestToSign`
 
+> 🟥 **C3-KORREKTUR (KAN-150, on-chain bewiesen) — Policy-Placement der Vektoren B/C/D geändert.** Die
+> `SpendingLimitsPolicy` ist **IActionPolicy-only** UND ihr `checkAction` parst einen **ERC-20
+> transfer/approve auf dem Action-TARGET (dem Token)**. In `userOpPolicies` lehnt SmartSession sie on-chain ab
+> (`UnsupportedPolicy 0x6a01dd01`); auf einer Nicht-Token-Action (DEX-Router-multicall) revertet sie bei USE
+> (`PolicyViolation 0x3b577361`). **Korrigierte Form (B/C/D unten regeneriert via `scripts/enable-vector.mjs`):**
+> `userOpPolicies = [TimeFrame-Window]`; **zwei Actions** — `token.approve → [SpendingLimits cap]` (cappt, was
+> der Router ziehen kann) **+** `router.swap → [TimeFrame]`. Enable + USE-mode on-chain validiert (Base Sepolia,
+> Receipts in `copy-trading-c3-usemode-lock.md`). **`permissionId` unverändert** (hängt nur an
+> sessionValidator/initData/salt); die **`digestToSign`-Werte unten sind NEU** — die alten (SpendingLimits in
+> userOpPolicies) sind digest-gültig aber **on-chain-invalid**. Die USE-mode-Op signiert den **RAW userOpHash**
+> (nicht EIP-191 — invers zum Kernel-Root/DCA-`digestToSign`).
+
 Fixe literale Inputs (alles unten ist im Vektor wörtlich gepinnt; `account` = bekannter Hardhat-acct0):
 ```
 account                  = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
@@ -118,23 +130,25 @@ digestToSign  chainId=8453 = 0x4e72e4786fd4b20eadd3211939947907da495ef97899faad3
 **Vektor B — realistische DCA** (ein Spending-Limit-`userOpPolicy` + eine Swap-`action` mit Time-Frame-
 Action-Policy). Zusätzliche literale Felder:
 ```
-userOpPolicies = [ { policy: 0x0000…0511,
-                     initData: 0x…a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48…0f4240 } ]   // USDC, cap 1_000_000
-actions = [ { actionTargetSelector: 0x5ae401dc,                                          // multicall(uint256,bytes[])
-              actionTarget:         0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45,          // UniV3 router (Beispiel)
-              actionPolicies: [ { policy: 0x0000…0522,
-                                  initData: 0x…683f9e80…687a4f00 } ] } ]                  // Time-Frame [start,end]
+userOpPolicies = [ { policy: 0x0000…0522, initData: 0x…683f1a80…687c0500 } ]              // Time-Frame [start,end] (Window)
+actions = [ { actionTargetSelector: 0x095ea7b3,                                           // approve(address,uint256) — Cap-Action
+              actionTarget:         0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48,           // USDC (Spend-Token)
+              actionPolicies: [ { policy: 0x0000…0511,
+                                  initData: 0x…a0b86991…0f4240 } ] },                      // SpendingLimits (USDC, cap 1_000_000)
+            { actionTargetSelector: 0x5ae401dc,                                           // multicall(uint256,bytes[]) — Swap-Action
+              actionTarget:         0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45,           // UniV3 router (Beispiel)
+              actionPolicies: [ { policy: 0x0000…0522, initData: 0x…683f1a80…687c0500 } ] } ]  // Time-Frame [start,end]
 permissionId               = 0xb6fab81ecda7453b12cafad20272ddf52459013a0e78f92e1ee528313ec20553
-digestToSign  chainId=1    = 0x4b7fe8e3ab2cf1929e70dda85aee35b48a005ce95a0d73a94f2221351ce62632
-digestToSign  chainId=8453 = 0x612b0831cbca241f4726678f3f8a17db5de2eb6838447f416514b635331b9ddd
+digestToSign  chainId=1    = 0x830c6b3c70ba344b258eddbfde6e44ffba3d4956d346e7c240df8a10f257873b
+digestToSign  chainId=8453 = 0xe129263b87b27aaf5273ac967f0f67252107f89cb0774ef752950dc79efdcc18
 ```
 **Vektor C — DCA SPONSORED** (identisch zu B, aber **`permitERC4337Paymaster = true`**) = der **echte
 DCA-Enable** (Pimlico-Sponsoring). Das ist der zu pinnende Real-Vektor:
 ```
 permitERC4337Paymaster     = true              // erc7739Policies weiterhin { [], [] }
 permissionId               = 0xb6fab81ecda7453b12cafad20272ddf52459013a0e78f92e1ee528313ec20553
-digestToSign  chainId=1    = 0x3829dee4858a5943584350f109b100cd6e8a6c1a17bc94fcf45d0357bc0c4d39
-digestToSign  chainId=8453 = 0xe85a3ea587b69870b1584e165e4b700d6e5c89fd0ddf2e56e56a4ecc31ebe320
+digestToSign  chainId=1    = 0xf6947f9e980925c4eb1fdd85a6d1a0ba92c3dc582bfc102cc971b763eebb2b27
+digestToSign  chainId=8453 = 0x1eb4a4a66ba6e71fc2013ec2ecec50777b593c50bd5ea660cfda31193bf42b39
 ```
 > `permissionId` ist in A==B==C identisch (hängt nur an sessionValidator/initData/salt — die hier gleich sind).
 > `chainId` ändert den Digest (1 vs 8453 verschieden) → bestätigt die Chain-Bindung über `ChainSession.chainId`.
@@ -230,12 +244,16 @@ zur Encoding-Illustration). `salt` ist app-gewählt (hier `0x…0001`), `nonce=0
 account                   = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266   (= owner, 7702 same-address)
 sessionValidator          = 0x000000000013fdB5234E4E3162a810F54d9f7E98   (OwnableValidator)
 sessionValidatorInitData  = 0x0000…0001 0000…0040 0000…0001 …f39f…2266   (abi.encode(1,[owner]))
-userOpPolicies[0].policy  = 0x000000000033212e272655d8a22402db819477a6   (SpendingLimits)
-actions[0].actionPolicies[0].policy = 0x0000000000D30f611fA3bf652ac6879428586930   (TimeFrame)
 permitERC4337Paymaster    = true   |   erc7739Policies = { [], [] }   |   salt = 0x…0001   |   nonce = 0
-permissionId              = 0x82bc397553fc6577974c762cd42958d860cd838a55f55f245ee5f6debab698b0
-digestToSign  chainId=1    = 0xba3ebab8845eff4c0f5c2871bdccaecb934b9909049bd36d776386a0390a133a
-digestToSign  chainId=8453 = 0xb45d0bc89f3abd41006eab254dccc8e5d9e206a3e3c180da16dfafb719191ca8
+# C3-korrigierte Placement (KAN-150): TimeFrame in userOpPolicies; Cap auf der Token-approve-Action; Swap separat.
+userOpPolicies[0].policy            = 0x0000000000D30f611fA3bf652ac6879428586930   (TimeFrame, Window)
+actions[0] = { selector 0x095ea7b3 (approve), target 0xa0b86991…eb48 (USDC),
+               actionPolicies[0].policy = 0x000000000033212e272655d8a22402db819477a6 (SpendingLimits, cap) }
+actions[1] = { selector 0x5ae401dc (multicall), target 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45 (Router),
+               actionPolicies[0].policy = 0x0000000000D30f611fA3bf652ac6879428586930 (TimeFrame, Window) }
+permissionId              = 0x82bc397553fc6577974c762cd42958d860cd838a55f55f245ee5f6debab698b0   (unverändert)
+digestToSign  chainId=1    = 0x8be4818ec1fb3068b671a68158eef275f922735658a18908069fe29225898c5c
+digestToSign  chainId=8453 = 0xdacaa17a34fbd97bb7764de7e9f4a79517f22f239d513f3d28753c7762df99f8
 ```
 > SDK `hashChainSessions` == raw-viem `hashTypedData` über die §1-Typtabelle → **MATCH ✓** (beide Chains).
 > Dev-1s app-gebaute Konstruktion muss mit seinem **eigenen** `salt`/`nonce` denselben Encoding-Pfad treffen;

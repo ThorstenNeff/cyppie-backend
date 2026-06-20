@@ -69,10 +69,28 @@ const POLICY = process.env.POLICY ?? "sudo";
 // (the selector SpendingLimits parses): transfer(dead, 0) — amount 0 ≤ cap, so the spend policy PASSES and the
 // ERC-20 transfer of 0 succeeds. C4/C6 swap this for the real Uniswap Universal Router selector (Q-C).
 const TRANSFER_SELECTOR = "0xa9059cbb"; // transfer(address,uint256)
+const APPROVE_SELECTOR = "0x095ea7b3"; // approve(address,uint256) — the DCA spend cap sits here
 const action = POLICY === "prod"
   ? { selector: TRANSFER_SELECTOR, callData: encodeFunctionData({ abi: parseAbi(["function transfer(address,uint256)"]), args: ["0x000000000000000000000000000000000000dEaD", 0n] }) }
+  : POLICY === "dca"
+  ? { selector: APPROVE_SELECTOR, callData: encodeFunctionData({ abi: parseAbi(["function approve(address,uint256)"]), args: ["0x000000000000000000000000000000000000dEaD", 0n] }) }
   : { selector: DEPOSIT_SELECTOR, callData: DEPOSIT_SELECTOR };
-const layout = POLICY === "prod"
+// Policy layouts:
+//   sudo → Sudo userOp + Sudo action (isolates the digest-lock).
+//   prod → TimeFrame userOp + SpendingLimits on the token transfer action.
+//   dca  → the corrected DCA enable shape (Vector D): TimeFrame userOp + TWO actions — SpendingLimits on the
+//          token APPROVE (the cap) + a TimeFrame-boxed router swap action (op2 exercises the approve action).
+const DUMMY_ROUTER = "0x000000000000000000000000000000000000c0de";
+const SWAP_SELECTOR = "0x5ae401dc";
+const layout = POLICY === "dca"
+  ? {
+      userOpPolicies: [{ policy: time.policy, initData: time.initData }],
+      actions: [
+        { actionTargetSelector: action.selector, actionTarget: WETH, actionPolicies: [{ policy: spend.policy, initData: spend.initData }] }, // cap on approve
+        { actionTargetSelector: SWAP_SELECTOR, actionTarget: DUMMY_ROUTER, actionPolicies: [{ policy: time.policy, initData: time.initData }] }, // swap, time-boxed
+      ],
+    }
+  : POLICY === "prod"
   ? {
       userOpPolicies: [{ policy: time.policy, initData: time.initData }],
       actions: [{ actionTargetSelector: action.selector, actionTarget: WETH, actionPolicies: [{ policy: spend.policy, initData: spend.initData }] }],
