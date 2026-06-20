@@ -3,6 +3,9 @@ import type { Address, Hex } from "viem";
 import { PORT, HOST } from "./config.js";
 import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, type SupportedChainId } from "./addresses.js";
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
+import { defaultRegistry, type CopyScope } from "./copySession.js";
+
+const copyRegistry = defaultRegistry();
 
 /**
  * Cyppie `aa-trigger` (KAN-139) — builds/submits ERC-4337 UserOps via permissionless.js/Pimlico for the
@@ -86,8 +89,31 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return send(res, 200, status);
   }
 
+  // Copy-Trading (KAN-149 C2): provision a scoped session keypair + return the ENABLE inputs for the app.
+  if (method === "POST" && url === "/v1/copy/session/prepare") {
+    const b = await readJson(req);
+    const chainId = requireChain(b.chainId);
+    for (const f of ["token", "capTotalBudget", "router", "selector", "windowStart", "windowEnd", "follower", "source"]) {
+      if (b[f] === undefined) throw new BadRequest(`missing ${f}`);
+    }
+    const scope: CopyScope = {
+      chainId, token: b.token as Address, capTotalBudget: BigInt(b.capTotalBudget as string),
+      router: b.router as Address, selector: b.selector as Hex,
+      windowStart: Number(b.windowStart), windowEnd: Number(b.windowEnd),
+      follower: b.follower as Address, source: b.source as Address,
+    };
+    return send(res, 200, copyRegistry.prepare(scope));
+  }
+  // Record the owner-signed enable for a prepared session (included ENABLE-mode in the first mirror op).
+  if (method === "POST" && url === "/v1/copy/session/grant") {
+    const b = await readJson(req);
+    if (!b.permissionId || !b.enableSignature) throw new BadRequest("missing permissionId or enableSignature");
+    const r = copyRegistry.grant(b.permissionId as string, b.enableSignature as Hex);
+    return send(res, 200, { permissionId: r.permissionId, status: r.status });
+  }
+
   if (method === "POST" && url === "/v1/session/trigger") {
-    return send(res, 501, { error: "session/trigger not yet implemented (Ph2)" });
+    return send(res, 501, { error: "session/trigger not yet implemented (Ph2 — C4)" });
   }
   send(res, 404, { error: "not found" });
 }
