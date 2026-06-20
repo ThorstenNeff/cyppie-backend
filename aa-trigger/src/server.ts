@@ -5,6 +5,7 @@ import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, 
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
 import { defaultRegistry, GateError, type CopyScope } from "./copySession.js";
 import { submitMirror } from "./mirror.js";
+import { verifyAlchemySignature, parseFollowedSpends, scaleMirror } from "./copyWebhook.js";
 
 const copyRegistry = defaultRegistry();
 
@@ -24,7 +25,7 @@ function send(res: ServerResponse, code: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readRaw(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const c of req) {
@@ -32,7 +33,11 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
     if (size > 256 * 1024) throw new Error("request body too large"); // loopback caller; bound it
     chunks.push(c as Buffer);
   }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = (await readRaw(req)).trim();
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
@@ -141,6 +146,32 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const { userOpHash } = await submitMirror(record, copyRegistry.signerFor(permissionId), calls);
     copyRegistry.recordMirror(permissionId, spend, sourceTxHash);
     return send(res, 200, { userOpHash, permissionId });
+  }
+
+  // Copy-Trading detection (C5): Alchemy Address-Activity push → HMAC-verify (fail-closed) → parse followed
+  // source→router spends → fan out to following sessions → scale → SubmitGate verdict. Returns the gated mirror
+  // PLAN; building the per-router swap calls + the gated submit (with ENABLE-mode-on-first-use) is C6.
+  if (method === "POST" && url === "/v1/copy/webhook") {
+    const raw = await readRaw(req);
+    const sig = req.headers["x-alchemy-signature"] as string | undefined;
+    if (!verifyAlchemySignature(raw, sig, process.env.ALCHEMY_WEBHOOK_SIGNING_KEY)) {
+      return send(res, 401, { error: "invalid webhook signature" }); // fail-closed
+    }
+    const payload = raw ? JSON.parse(raw) : {};
+    const followed = (addr: string) => copyRegistry.list().some((r) => r.status === "granted" && r.scope.source.toLowerCase() === addr.toLowerCase());
+    const spends = parseFollowedSpends(payload, followed);
+    const mirrors: Array<Record<string, unknown>> = [];
+    for (const s of spends) {
+      for (const r of copyRegistry.findBySource(s.source, s.chainId)) {
+        const remainingCap = BigInt(r.scope.capTotalBudget) - BigInt(r.spentTotal ?? "0");
+        const amount = scaleMirror(s.amountIn, 10_000, remainingCap); // Q-B: fixed-cap match, clamped to the cap
+        if (amount <= 0n) continue;
+        let gate = "ok";
+        try { copyRegistry.assertMirrorable(r.permissionId, amount, s.sourceTxHash); } catch (e) { gate = e instanceof Error ? e.message : String(e); }
+        mirrors.push({ permissionId: r.permissionId, tokenIn: s.tokenIn, amount: amount.toString(), sourceTxHash: s.sourceTxHash, router: s.router, gate });
+      }
+    }
+    return send(res, 200, { detected: spends.length, mirrors });
   }
   send(res, 404, { error: "not found" });
 }

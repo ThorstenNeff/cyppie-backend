@@ -162,6 +162,13 @@ export class CopySessionRegistry {
   list(): CopyRecord[] {
     return [...this.records.values()];
   }
+  /** Granted (active) sessions following a given source trader on a chain (C5 webhook fan-out). */
+  findBySource(source: string, chainId: number): CopyRecord[] {
+    const s = source.toLowerCase();
+    return [...this.records.values()].filter(
+      (r) => r.status === "granted" && !r.paused && r.scope.source.toLowerCase() === s && r.scope.chainId === chainId,
+    );
+  }
   upsert(r: CopyRecord): void {
     this.records.set(r.permissionId, r);
     this.persist();
