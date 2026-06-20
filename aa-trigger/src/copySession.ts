@@ -2,10 +2,11 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  getOwnableValidator, getSpendingLimitsPolicy, getTimeFramePolicy, getPermissionId, SMART_SESSIONS_ADDRESS,
+  getOwnableValidator, getSpendingLimitsPolicy, getTimeFramePolicy, getPermissionId, getOwnableValidatorSignature,
+  encodeSmartSessionSignature, SmartSessionMode, SMART_SESSIONS_ADDRESS,
 } from "@rhinestone/module-sdk";
-import { toHex, type Address, type Hex } from "viem";
-import { KeychainSessionKeySigner } from "./sessionKeySigner.js";
+import { toHex, encodePacked, type Address, type Hex } from "viem";
+import { KeychainSessionKeySigner, type SessionKeySigner } from "./sessionKeySigner.js";
 import type { SupportedChainId } from "./addresses.js";
 
 /**
@@ -35,15 +36,22 @@ export interface EnableInputs {
   sessionValidator: Address; // OwnableValidator (GLOBAL_CONSTANTS)
   sessionValidatorInitData: Hex; // abi.encode(1, [sessionPublicKey])
   salt: Hex; // backend-generated, makes the permissionId unique per session
-  userOpPolicies: { policy: Address; initData: Hex }[]; // [SpendingLimits cap]
-  actions: { actionTargetSelector: Hex; actionTarget: Address; actionPolicies: { policy: Address; initData: Hex }[] }[]; // [router+selector, [TimeFrame]]
+  userOpPolicies: { policy: Address; initData: Hex }[]; // [TimeFrame window] (IUserOpPolicy)
+  actions: { actionTargetSelector: Hex; actionTarget: Address; actionPolicies: { policy: Address; initData: Hex }[] }[]; // [router+selector, [SpendingLimits cap]] (IActionPolicy)
   erc7739Policies: { allowedERC7739Content: never[]; erc1271Policies: never[] };
   permitERC4337Paymaster: true;
   permissionId: Hex;
   smartSession: Address;
 }
 
-/** Assemble the canonical ENABLE inputs for a session key + scope (pure; the byte-exact target for the app). */
+/**
+ * Assemble the canonical ENABLE inputs for a session key + scope (pure; the byte-exact target for the app).
+ *
+ * Policy placement (C3 on-chain finding, proven on Base Sepolia): the SpendingLimitsPolicy implements only
+ * `IActionPolicy`, so SmartSession rejects it in the `userOpPolicies` slot (UnsupportedPolicy 0x6a01dd01). The
+ * spend cap belongs on the scoped router ACTION; the TimeFrame window goes in `userOpPolicies` (it implements
+ * `IUserOpPolicy`). Both layouts were enabled + USE-validated on-chain (mirror receipts in the C3 lock report).
+ */
 export function assembleEnableInputs(sessionPublicKey: Address, salt: Hex, scope: CopyScope): EnableInputs {
   const ov = getOwnableValidator({ threshold: 1, owners: [sessionPublicKey] });
   const spend = getSpendingLimitsPolicy([{ token: scope.token, limit: scope.capTotalBudget }]);
@@ -52,9 +60,9 @@ export function assembleEnableInputs(sessionPublicKey: Address, salt: Hex, scope
     sessionValidator: ov.address as Address,
     sessionValidatorInitData: ov.initData as Hex,
     salt,
-    userOpPolicies: [{ policy: spend.policy as Address, initData: spend.initData as Hex }],
+    userOpPolicies: [{ policy: time.policy as Address, initData: time.initData as Hex }], // TimeFrame (IUserOpPolicy): the window
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
-    actions: [{ actionTargetSelector: scope.selector, actionTarget: scope.router, actionPolicies: [{ policy: time.policy as Address, initData: time.initData as Hex }] }],
+    actions: [{ actionTargetSelector: scope.selector, actionTarget: scope.router, actionPolicies: [{ policy: spend.policy as Address, initData: spend.initData as Hex }] }], // SpendingLimits (IActionPolicy): the cap, on the router action
     permitERC4337Paymaster: true as const,
     chainId: BigInt(scope.chainId),
   };
@@ -64,6 +72,40 @@ export function assembleEnableInputs(sessionPublicKey: Address, salt: Hex, scope
     salt, userOpPolicies: session.userOpPolicies, actions: session.actions, erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
     permitERC4337Paymaster: true, permissionId, smartSession: SMART_SESSIONS_ADDRESS as Address,
   };
+}
+
+/**
+ * Build the USE-mode `userOp.signature` for a copy-trade mirror op (the C4 trigger calls this per mirror).
+ *
+ * 🔒 USE-mode DIGEST-LOCK (C3, proven on-chain on Base Sepolia — mirror receipts 0x877f60… [sudo policies] +
+ * 0xb410b4… [prod policies], both success, EntryPoint v0.7): the OwnableValidator session-validator recovers
+ * the signer over the **RAW userOpHash** — NOT the EIP-191 `hashMessage(userOpHash)` form that the Kernel ROOT
+ * validator uses for DCA ([[userop.ts]] digestToSign). So the backend session signer signs the raw 32-byte
+ * userOpHash; the 65-byte r‖s‖v (EIP-2 low-S, C1) is wrapped as a threshold-1 OwnableValidator signature and
+ * packed USE-mode (`0x00 ‖ permissionId ‖ ownableSig`). Verified gas-free against the deployed OwnableValidator
+ * `validateSignatureWithData` (raw-recover, no internal EIP-191) and end-to-end with the receipts above.
+ */
+export async function buildUseModeUserOpSignature(signer: SessionKeySigner, userOpHash: Hex, permissionId: Hex): Promise<Hex> {
+  const sessionSig = await signer.sign(userOpHash); // raw userOpHash — the C3 lock; 65-byte r‖s‖v, EIP-2 low-S
+  const ownableSig = getOwnableValidatorSignature({ signatures: [sessionSig] }) as Hex;
+  return encodeSmartSessionSignature({ mode: SmartSessionMode.USE, permissionId, signature: ownableSig }) as Hex;
+}
+
+/**
+ * The Kernel v3 validator-nonce KEY (uint192) that routes a userOp to the Smart Sessions validator:
+ *   [1B mode=0x00 DEFAULT][1B vtype=0x01 VALIDATOR][20B SmartSessions][2B nonceKey].
+ *
+ * C3 gotchas: (1) the vtype byte MUST be 0x01 (VALIDATOR) — module-sdk's `encodeValidatorNonce` emits 0x00
+ * (routes to the root ECDSA validator → InvalidSignature 0x8baa579f). (2) permissionless's
+ * `to7702KernelSmartAccount.getNonce({key})` ignores the key — read the EntryPoint's `getNonce(sender, key)`
+ * directly with this value. (3) the SmartSessions validator must be installed with `selectorData` granting the
+ * Kernel `execute` selector, else Kernel rejects it (InvalidValidator 0x682a6e7c).
+ */
+export function smartSessionUseModeNonceKey(nonceKey = 0): bigint {
+  return BigInt(encodePacked(
+    ["bytes1", "bytes1", "address", "bytes2"],
+    ["0x00", "0x01", SMART_SESSIONS_ADDRESS as Address, toHex(nonceKey, { size: 2 })],
+  ));
 }
 
 // ── Registry: session metadata co-located with the keys (the trigger needs both to sign) ──────────────
