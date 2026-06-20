@@ -131,7 +131,14 @@ export interface CopyRecord {
   salt: Hex;
   status: CopyStatus;
   enableSignature?: Hex; // the owner-signed enable, included (ENABLE-mode) in the first mirror op
+  // ── SubmitGate state (C4) ──
+  paused?: boolean; // kill-switch: mirrors rejected while true (separate from on-chain revoke)
+  spentTotal?: string; // Q7 backend accounting: cumulative mirrored spend (defense-in-depth on the on-chain cap)
+  mirroredTx?: string[]; // idempotency: source tx hashes already mirrored (no double-mirror on webhook retry)
 }
+
+/** A SubmitGate rejection (kill-switch / exposure cap / idempotency / not-granted) → HTTP 409/400, never a 500. */
+export class GateError extends Error {}
 
 const KEYCHAIN_SERVICE = "cyppie-copy-session";
 
@@ -188,6 +195,55 @@ export class CopySessionRegistry {
     const r = this.records.get(permissionId);
     if (!r) throw new Error(`unknown permissionId ${permissionId}`);
     return new KeychainSessionKeySigner(KEYCHAIN_SERVICE, r.keychainAccount, r.sessionPublicKey);
+  }
+
+  /** Kill-switch: pause/resume mirrors for a session (independent of the on-chain revoke). */
+  setPaused(permissionId: string, paused: boolean): CopyRecord {
+    const r = this.records.get(permissionId);
+    if (!r) throw new GateError(`unknown permissionId ${permissionId}`);
+    const updated = { ...r, paused };
+    this.upsert(updated);
+    return updated;
+  }
+
+  /** Mark a session on-chain-revoked (no further mirrors). */
+  revoke(permissionId: string): CopyRecord {
+    const r = this.records.get(permissionId);
+    if (!r) throw new GateError(`unknown permissionId ${permissionId}`);
+    const updated: CopyRecord = { ...r, status: "revoked" };
+    this.upsert(updated);
+    return updated;
+  }
+
+  /**
+   * SubmitGate (C4) — the double-gate before a mirror is signed/submitted. Throws GateError (→ 4xx) on:
+   * not-granted/revoked/paused (kill-switch), a duplicate source tx (idempotency), or an exposure breach
+   * (Q7: spentTotal + spend > the on-chain cap — fail fast before paying to submit a doomed op). The on-chain
+   * SpendingLimits cap is the hard bound; this backend accounting is the fail-fast + cross-op aggregate (N3/Q7).
+   */
+  assertMirrorable(permissionId: string, spend: bigint, sourceTxHash: string): CopyRecord {
+    const r = this.records.get(permissionId);
+    if (!r) throw new GateError(`unknown permissionId ${permissionId}`);
+    if (r.status !== "granted") throw new GateError(`session not granted (status=${r.status})`);
+    if (r.paused) throw new GateError("session paused (kill-switch)");
+    if ((r.mirroredTx ?? []).includes(sourceTxHash)) throw new GateError(`source ${sourceTxHash} already mirrored (idempotent)`);
+    const spent = BigInt(r.spentTotal ?? "0");
+    const cap = BigInt(r.scope.capTotalBudget);
+    if (spent + spend > cap) throw new GateError(`exposure cap exceeded (${spent + spend} > ${cap})`);
+    return r;
+  }
+
+  /** Record a submitted mirror (Q7 accounting + idempotency). Call AFTER a successful submit. */
+  recordMirror(permissionId: string, spend: bigint, sourceTxHash: string): CopyRecord {
+    const r = this.records.get(permissionId);
+    if (!r) throw new GateError(`unknown permissionId ${permissionId}`);
+    const updated: CopyRecord = {
+      ...r,
+      spentTotal: (BigInt(r.spentTotal ?? "0") + spend).toString(),
+      mirroredTx: [...(r.mirroredTx ?? []), sourceTxHash],
+    };
+    this.upsert(updated);
+    return updated;
   }
 }
 

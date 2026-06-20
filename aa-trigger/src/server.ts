@@ -3,7 +3,8 @@ import type { Address, Hex } from "viem";
 import { PORT, HOST } from "./config.js";
 import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, type SupportedChainId } from "./addresses.js";
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
-import { defaultRegistry, type CopyScope } from "./copySession.js";
+import { defaultRegistry, GateError, type CopyScope } from "./copySession.js";
+import { submitMirror } from "./mirror.js";
 
 const copyRegistry = defaultRegistry();
 
@@ -112,15 +113,41 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return send(res, 200, { permissionId: r.permissionId, status: r.status });
   }
 
+  // Kill-switch (C4): pause/resume a session's mirrors + mark on-chain-revoked.
+  if (method === "POST" && (url === "/v1/copy/session/pause" || url === "/v1/copy/session/resume" || url === "/v1/copy/session/revoke")) {
+    const b = await readJson(req);
+    if (!b.permissionId) throw new BadRequest("missing permissionId");
+    const id = b.permissionId as string;
+    const r = url.endsWith("revoke") ? copyRegistry.revoke(id) : copyRegistry.setPaused(id, url.endsWith("pause"));
+    return send(res, 200, { permissionId: r.permissionId, status: r.status, paused: !!r.paused });
+  }
+
+  // Copy-Trading mirror trigger (C4): SubmitGate (kill-switch + Q7 + idempotency) → build USE-mode mirror,
+  // sign with the backend session key, submit. `calls` is the scaled mirror (built by the C5 webhook path);
+  // `spend` is the input-token amount for the Q7 accounting; `sourceTxHash` is the idempotency key.
   if (method === "POST" && url === "/v1/session/trigger") {
-    return send(res, 501, { error: "session/trigger not yet implemented (Ph2 — C4)" });
+    const b = await readJson(req);
+    if (!b.permissionId || !b.calls || b.spend === undefined || !b.sourceTxHash) {
+      throw new BadRequest("missing permissionId, calls, spend or sourceTxHash");
+    }
+    const permissionId = b.permissionId as string;
+    const spend = BigInt(b.spend as string);
+    const sourceTxHash = b.sourceTxHash as string;
+    const callsIn = b.calls as Array<{ to: Address; value?: string; data?: Hex }>;
+    if (callsIn.length === 0) throw new BadRequest("missing calls");
+    const calls: Call[] = callsIn.map((c) => ({ to: c.to, value: BigInt(c.value ?? "0x0"), data: c.data ?? "0x" }));
+    // Gate FIRST (fail-closed, no spend until it passes), then sign+submit, then record (Q7 + idempotency).
+    const record = copyRegistry.assertMirrorable(permissionId, spend, sourceTxHash);
+    const { userOpHash } = await submitMirror(record, copyRegistry.signerFor(permissionId), calls);
+    copyRegistry.recordMirror(permissionId, spend, sourceTxHash);
+    return send(res, 200, { userOpHash, permissionId });
   }
   send(res, 404, { error: "not found" });
 }
 
 const server = createServer((req, res) => {
   handle(req, res).catch((e) => {
-    const code = e instanceof BadRequest ? 400 : 500;
+    const code = e instanceof GateError ? 409 : e instanceof BadRequest ? 400 : 500;
     send(res, code, { error: String(e instanceof Error ? e.message : e) });
   });
 });

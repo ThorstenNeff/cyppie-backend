@@ -102,7 +102,7 @@ export interface BuiltUserOp {
 }
 
 /** Watch-only owner: the backend has the address, NEVER the device key — signing throws (fail-closed). */
-function watchOwner(address: Address) {
+export function watchOwner(address: Address) {
   return toAccount({
     address,
     async signMessage() { throw new Error("watch-only owner: signing happens on-device"); },

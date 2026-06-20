@@ -3,7 +3,7 @@
 import { hashChainSessions } from "@rhinestone/module-sdk";
 import { hashTypedData, hashMessage, recoverAddress, slice } from "viem";
 import { rmSync } from "node:fs";
-import { assembleEnableInputs, CopySessionRegistry, buildUseModeUserOpSignature, smartSessionUseModeNonceKey } from "./dist/copySession.js";
+import { assembleEnableInputs, CopySessionRegistry, GateError, buildUseModeUserOpSignature, smartSessionUseModeNonceKey } from "./dist/copySession.js";
 import { InMemorySessionKeySigner } from "./dist/sessionKeySigner.js";
 
 let fails = 0;
@@ -84,6 +84,23 @@ const granted = reg.grant(prepared.permissionId, "0xdeadbeef");
 ok(granted.status === "granted" && reg.get(prepared.permissionId)?.enableSignature === "0xdeadbeef", "grant -> status granted + enableSig stored");
 const signer = reg.signerFor(prepared.permissionId);
 ok(signer.publicKeyAddress().toLowerCase() === prepared.sessionPublicKey.toLowerCase(), "signerFor resolves the session key (address matches)");
+console.log("C4: SubmitGate — kill-switch + Q7 exposure + idempotency (deterministic, no network)");
+{
+  const expectGate = (fn, m) => { try { fn(); ok(false, m); } catch (e) { ok(e instanceof GateError, `${m}: ${e.message}`); } };
+  const pid = prepared.permissionId; // 'granted' from the lifecycle test above; cap = scope.capTotalBudget (1_000_000)
+  ok(reg.assertMirrorable(pid, 400000n, "0xsrcA").permissionId === pid, "granted+unpaused+under-cap → mirrorable");
+  reg.recordMirror(pid, 400000n, "0xsrcA");
+  ok(BigInt(reg.get(pid).spentTotal) === 400000n, "Q7 spentTotal accrues");
+  expectGate(() => reg.assertMirrorable(pid, 1n, "0xsrcA"), "idempotency: duplicate source tx rejected");
+  reg.setPaused(pid, true);
+  expectGate(() => reg.assertMirrorable(pid, 1n, "0xsrcB"), "kill-switch: paused rejected");
+  reg.setPaused(pid, false);
+  expectGate(() => reg.assertMirrorable(pid, 700000n, "0xsrcC"), "Q7: exposure over cap rejected (400k+700k > 1M)");
+  ok(reg.assertMirrorable(pid, 600000n, "0xsrcC").permissionId === pid, "Q7: exactly to the cap is allowed (400k+600k = 1M)");
+  reg.revoke(pid);
+  expectGate(() => reg.assertMirrorable(pid, 1n, "0xsrcD"), "revoked: rejected");
+}
+
 console.log("C3: USE-mode DIGEST-LOCK — session signs the RAW userOpHash (proven on Base Sepolia)");
 {
   const PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
