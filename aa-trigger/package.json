@@ -11,6 +11,7 @@
     "audit": "npm audit --omit=dev"
   },
   "dependencies": {
+    "@noble/curves": "^1.9.1",
     "@rhinestone/module-sdk": "^0.3.0",
     "permissionless": "^0.2.36",
     "viem": "^2.21.55"
