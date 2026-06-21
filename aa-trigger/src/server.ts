@@ -60,6 +60,8 @@ function minOutFor(chainId: number, _slippageBps?: number): bigint | null {
   return null;
 }
 
+/** KAN-161 dynamic mode default pool fee when the session didn't pin one (QuoterV2 resolves the real pool in KAN-151). */
+const DYNAMIC_DEFAULT_FEE_TIER = 3000;
 const ERC20_APPROVE_SELECTOR = "0x095ea7b3";
 const selectorOf = (data?: Hex): string => (data ?? "0x").slice(0, 10).toLowerCase();
 
@@ -282,14 +284,24 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
           const amount = scaleMirror(s.amountIn, r.scope.allocationBps ?? 10_000, remainingCap); // % allocation (default full-match), clamped to the cap
           base.amount = amount.toString();
           if (amount <= 0n) { mirrors.push({ ...base, status: "skipped", reason: "cap exhausted or zero" }); continue; }
-          if (!r.scope.tokenOut || !r.scope.feeTier) { mirrors.push({ ...base, status: "skipped", reason: "no copy-direction (tokenOut/feeTier)" }); continue; }
+          // KAN-161 copy-direction: FIXED mode = scope.tokenOut set (the follower pre-committed to a trusted token).
+          // DYNAMIC mode = scope.tokenOut null → mirror whatever the trader bought (the parsed output leg). Fail-closed
+          // if dynamic but the output leg wasn't unambiguously derivable (no blind guess of what to buy).
+          const dynamic = !r.scope.tokenOut;
+          const tokenOut = r.scope.tokenOut ?? s.tokenOutDetected;
+          if (!tokenOut) { mirrors.push({ ...base, status: "skipped", reason: "dynamic: no output leg detected (can't derive tokenOut)" }); continue; }
+          const feeTier = r.scope.feeTier ?? DYNAMIC_DEFAULT_FEE_TIER; // dynamic: default pool fee (QuoterV2 resolves the real pool in KAN-151)
+          base.mode = dynamic ? "dynamic" : "fixed"; base.tokenOut = tokenOut;
+          // Guardrail (ADR-0024 harm-reduction): never submit without a reliable slippage floor — matters MORE in
+          // dynamic mode (the bought token is the trader's choice, not pre-vetted). minOutFor fail-closes mainnet
+          // until the QuoterV2 floor (KAN-151); testnet (no MEV) allows a 0 floor for the proof.
           const amountOutMin = minOutFor(s.chainId, r.scope.slippageBps);
-          if (amountOutMin === null) { mirrors.push({ ...base, status: "skipped", reason: "no slippage floor (needs quote on mainnet)" }); continue; } // fail-closed: never mirror blind on slippage
+          if (amountOutMin === null) { mirrors.push({ ...base, status: "skipped", reason: "no slippage floor (needs quote on mainnet — KAN-151)" }); continue; }
           const key = spendKey(s); // P2-2: idempotency keyed (txHash, logIndex) — each leg of a multi-swap tx mirrors
           copyRegistry.reserve(r.permissionId, amount, key); // P1-1: ATOMIC gate+reserve (throws GateError → caught below)
           const plan: MirrorPlan = {
-            chainId: s.chainId, router: s.router, tokenIn: s.tokenIn, tokenOut: r.scope.tokenOut,
-            amountIn: amount, amountOutMin, feeTier: r.scope.feeTier, deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
+            chainId: s.chainId, router: s.router, tokenIn: s.tokenIn, tokenOut,
+            amountIn: amount, amountOutMin, feeTier, deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
           };
           const calls = buildMirrorCalls(plan);
           const nonceKey = copyRegistry.nextNonceKey(r.scope.follower); // P1-1: distinct nonce lane per concurrent op

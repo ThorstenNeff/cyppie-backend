@@ -112,6 +112,25 @@ deferred FF-b, blocked on the ERC-7739 enable-sig digest.) The byte-exact enable
 - **P2-4 · test-mutators fenced:** `__registerTestAdapter`/`__allowTestRouter` throw unless `COPY_TEST_HOOKS=1`
   (E2E only) — they ship in the bundle but cannot mutate the prod allowlist/adapter singletons.
 
-Status: C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ · C5 ✅ · **C6 ✅ (swap adapter + gated submit + webhook→receipt E2E)** · **KAN-156 P1s + P2s ✅** (enable-submission = approach B).
+## KAN-161 — fixed vs dynamic mirror-token (user-selectable)
+
+The follower picks the mirror-token semantics; the interface is a **nullable `scope.tokenOut`**:
+- **Fixed** (`scope.tokenOut` set) — mirror into the pre-committed (trusted) token. Unchanged.
+- **Dynamic** (`scope.tokenOut == null`) — mirror **whatever the trader bought**: C5 `parseFollowedSpends` now
+  also derives the swap's **output leg** (`tokenOutDetected` = the unique token the `source` received in the same
+  tx; ambiguous/none ⇒ undefined). The webhook uses `scope.tokenOut ?? s.tokenOutDetected`; `feeTier` falls back
+  to `DYNAMIC_DEFAULT_FEE_TIER` (QuoterV2 will resolve the real pool/fee in KAN-151).
+
+Fail-closed (ADR-0024 harm-reduction): dynamic with no derivable output leg ⇒ skip (no blind guess of what to
+buy); and **never submit without a reliable `minOut`** — `minOutFor` fail-closes mainnet until the QuoterV2
+slippage floor (KAN-151), so mainnet dynamic is gated; testnet (no MEV) allows a 0 floor for the proof. The cap +
+router binding still bound the €-amount. Mirror response carries `mode` ("fixed"|"dynamic") + the resolved
+`tokenOut`. No enable/permissionId change (mirror-time only). *Optional fast-follow: per-chain tokenOut allowlist.*
+
+Proof (Base Sepolia): `c8-dynamic-e2e.mjs` — 2-leg swap webhook → derived tokenOut (USDC `0x8335…2913`) →
+dynamic-mode mirror receipt `0x0a19d0c7…`; fixed mode unchanged (`c6-e2e.mjs` green). Unit: output-leg derive
+(keep/ambiguous/none) in `copywebhook.test.mjs`.
+
+Status: C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ · C5 ✅ · **C6 ✅ (swap adapter + gated submit + webhook→receipt E2E)** · **KAN-156 P1s + P2s ✅** (enable-submission = approach B) · **KAN-161 ✅** (fixed + dynamic mirror-token).
 Fast-follows: (a) QuoterV2 slippage floor → mainnet mirrors; (b) ERC-7739 enable-sig → ENABLE-mode-on-first-use;
 (c) real-liquidity testnet swap (funded account + pool).

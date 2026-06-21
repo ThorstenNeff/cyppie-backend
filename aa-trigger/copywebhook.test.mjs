@@ -67,6 +67,30 @@ ok(spendKey(legs[0]) !== spendKey(legs[1]), "distinct idempotency keys for the t
 ok(spendKey(legs[0]) === "0xmulti:3", `spendKey = txHash:logIndex (got ${spendKey(legs[0])})`);
 ok(spendKey({ sourceTxHash: "0xNOLOG", logIndex: 0 }) === "0xnolog:0", "no-log activity → logIndex 0");
 
+console.log("KAN-161: dynamic mode — derive tokenOut from the source swap's OUTPUT leg");
+const TOKEN_OUT = "0x4200000000000000000000000000000000000006"; // WETH (Base) — what the trader received
+const POOL = "0x5555555555555555555555555555555555555555";
+const swap = { event: { network: "BASE_MAINNET", activity: [
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xswap", rawContract: { address: TOKEN, rawValue: "0xf4240" } }, // input leg: source spends TOKEN
+  { category: "token", fromAddress: POOL, toAddress: SOURCE, hash: "0xswap", rawContract: { address: TOKEN_OUT, rawValue: "0x2710" } }, // output leg: source receives TOKEN_OUT
+] } };
+const sw = parseFollowedSpends(swap, isFollowed);
+ok(sw.length === 1, `input leg detected (got ${sw.length})`);
+ok(sw[0].tokenOutDetected?.toLowerCase() === TOKEN_OUT.toLowerCase(), "tokenOut derived from the output leg");
+ok(sw[0].amountOutDetected === 10000n, "amountOut derived from the output leg");
+// ambiguous: two distinct received tokens → no derive (fail-closed)
+const ambig = { event: { network: "BASE_MAINNET", activity: [
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xamb", rawContract: { address: TOKEN, rawValue: "0xf4240" } },
+  { category: "token", fromAddress: POOL, toAddress: SOURCE, hash: "0xamb", rawContract: { address: TOKEN_OUT, rawValue: "0x2710" } },
+  { category: "token", fromAddress: POOL, toAddress: SOURCE, hash: "0xamb", rawContract: { address: "0x111122223333444455556666777788889999AaAa", rawValue: "0x1" } },
+] } };
+ok(parseFollowedSpends(ambig, isFollowed)[0]?.tokenOutDetected === undefined, "ambiguous output (2 tokens) → no derive (dynamic fail-closed)");
+// no output leg (only the input transfer) → no derive
+const noOut = { event: { network: "BASE_MAINNET", activity: [
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xnoout", rawContract: { address: TOKEN, rawValue: "0xf4240" } },
+] } };
+ok(parseFollowedSpends(noOut, isFollowed)[0]?.tokenOutDetected === undefined, "no output leg → no derive");
+
 console.log("C5: scaleMirror — proportional, cap-clamped");
 ok(scaleMirror(1000000n, 5000, 10n ** 18n) === 500000n, "50% allocation");
 ok(scaleMirror(1000000n, 10000, 400000n) === 400000n, "clamped to remaining cap");

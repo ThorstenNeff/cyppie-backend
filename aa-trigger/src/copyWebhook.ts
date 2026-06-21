@@ -55,6 +55,10 @@ export interface DetectedSpend {
   sourceTxHash: string;   // the source tx hash
   logIndex: number;       // the on-chain log index within the tx (P2-2: a multi-swap tx has distinct legs)
   chainId: number;
+  // KAN-161 dynamic mode: the token the trader RECEIVED in the same tx (output leg) — used as the mirror's
+  // tokenOut when the session's scope.tokenOut is null (dynamic). Absent if no unambiguous output leg was seen.
+  tokenOutDetected?: Address;
+  amountOutDetected?: bigint;
 }
 
 /** P2-2 (KAN-156): the idempotency key for a mirror — `txHash:logIndex`, so each leg of a multi-swap tx mirrors. */
@@ -72,12 +76,40 @@ const NETWORK_CHAIN: Record<string, number> = {
  * else (external transfers, non-followed source, unknown/non-allowlisted router, missing token/amount) is
  * dropped — no blind mirror. Pure; the caller supplies `isFollowed` (the set of followed source addresses).
  */
+/**
+ * KAN-161 dynamic mode: derive the OUTPUT leg of a source swap = the unique token the `source` RECEIVED in the
+ * same tx (an ERC-20 transfer to `source`, in `hash`, distinct from `tokenIn`). Returns null if there's no such
+ * leg or it's ambiguous (>1 distinct received token) — the caller then fail-closes the dynamic mirror (no blind
+ * guess of what to buy). Pure; scans the same webhook payload.
+ */
+function deriveOutputLeg(activities: unknown[], hash: string, source: string, tokenIn: string): { tokenOut: Address; amountOut: bigint } | null {
+  const s = source.toLowerCase(), tin = tokenIn.toLowerCase();
+  const received = new Map<string, bigint>();
+  for (const aRaw of activities) {
+    try {
+      const a = aRaw as { category?: string; toAddress?: string; hash?: string; rawContract?: { address?: string; rawValue?: string } };
+      if (a.category !== "token" || a.hash !== hash || (a.toAddress ?? "").toLowerCase() !== s) continue;
+      const tok = a.rawContract?.address; const raw = a.rawContract?.rawValue;
+      if (!tok || !raw) continue;
+      const t = tok.toLowerCase();
+      if (t === tin) continue; // not the input token
+      const amt = BigInt(raw);
+      if (amt <= 0n) continue;
+      received.set(t, (received.get(t) ?? 0n) + amt);
+    } catch { continue; }
+  }
+  if (received.size !== 1) return null; // none or ambiguous → dynamic fail-closed
+  const entry = [...received.entries()][0]!;
+  return { tokenOut: getAddress(entry[0]), amountOut: entry[1] };
+}
+
 export function parseFollowedSpends(payload: unknown, isFollowed: (addr: string) => boolean): DetectedSpend[] {
   const p = payload as { event?: { network?: string; activity?: unknown[] } };
   const chainId = NETWORK_CHAIN[p.event?.network ?? ""] ?? 0;
   if (!chainId) return [];
+  const activities = p.event?.activity ?? [];
   const out: DetectedSpend[] = [];
-  for (const aRaw of p.event?.activity ?? []) {
+  for (const aRaw of activities) {
     // P2-3 (KAN-156): guard EACH activity — one malformed entry (bad address → getAddress throws) must not 500 the
     // webhook (→ Alchemy retry storm + the valid spends in the same batch lost). Drop the bad one, keep the rest.
     try {
@@ -96,9 +128,11 @@ export function parseFollowedSpends(payload: unknown, isFollowed: (addr: string)
       if (amountIn <= 0n) continue;
       const li = a.log?.logIndex;                                 // P2-2: on-chain log index (hex or number); 0 if absent
       const logIndex = li != null && Number.isFinite(Number(li)) ? Number(li) : 0;
+      const outLeg = deriveOutputLeg(activities, hash, from, token); // KAN-161: what the trader received (dynamic mode)
       out.push({
         source: getAddress(from), router: getAddress(to), tokenIn: getAddress(token),
         amountIn, sourceTxHash: hash, logIndex, chainId,
+        tokenOutDetected: outLeg?.tokenOut, amountOutDetected: outLeg?.amountOut,
       });
     } catch {
       continue; // malformed activity — drop it, never let it sink the batch
