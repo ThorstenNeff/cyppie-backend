@@ -42,6 +42,38 @@ The Kernel `callData` is the account's batch-execute of EXACTLY these two calls 
    `router.execute(0x3593564c)→TimeFrame` (Permit2 `0x000000000022D473030F116dDEE9F6B43aC78BA3`). Pin the same
    `(target,selector)` set the backend `requiredActions` produces — see `scripts/copy-vector.mjs`.
 
+### (b-exact) Step-2 decode/rebuild ABI — verified against the vector
+The `userOp.callData` is the Kernel **batch execute**. Layout (all selectors + the batch shape verified against
+`enable-userop-vector.mjs`):
+
+**Outer — Kernel execute** (selector **`0xe9ae5c53`**): `execute(bytes32 mode, bytes executionCalldata)`.
+- `mode` (bytes32) = **`0x0100000000000000000000000000000000000000000000000000000000000000`** — ERC-7579 execMode, callType `0x01` (BATCH) ‖ execType `0x00` (default/revert) ‖ zero payload.
+- `executionCalldata` = `abi.encode(Execution[])`, `Execution = (address target, uint256 value, bytes callData)`. Here **exactly 2** executions, in order:
+
+**call[0] — installModule** (selector **`0x9517e29f`**), `target == sender` (the follower SCA):
+`installModule(uint256 moduleTypeId, address module, bytes initData)` with `moduleTypeId = 1` (validator),
+`module = 0x00000000008bDABA73cD9815d79069c247Eb4bDA` (SMART_SESSIONS_ADDRESS), and the Kernel-v3.3
+`initData = abi.encodePacked(hook=0x..01, abi.encode(validatorData=getSmartSessionsValidator().initData, hookData=0x, selectorData=0xe9ae5c53))`.
+
+**call[1] — enableSessions** (selector **`0x21712407`**), `target == 0x00000000008bDABA73cD9815d79069c247Eb4bDA`:
+`enableSessions(Session[] sessions)` (exactly 1 session). The `Session` tuple (human-readable, ABI order):
+```
+Session = (
+  address sessionValidator,            // OwnableValidator 0x000000000013fdB5234E4E3162a810F54d9f7E98
+  bytes   sessionValidatorInitData,    // abi.encode(uint256 threshold=1, address[] owners=[sessionPubkey])
+  bytes32 salt,
+  (address policy, bytes initData)[] userOpPolicies,                 // [TimeFrame window]
+  ( (bytes32 appDomainSeparator, string[] contentName)[] allowedERC7739Content,
+    (address policy, bytes initData)[] erc1271Policies ) erc7739Policies,   // both empty []
+  (bytes4 actionTargetSelector, address actionTarget, (address policy, bytes initData)[] actionPolicies)[] actions,
+  bool permitERC4337Paymaster          // true
+)
+```
+`actions` = the adapter-driven 3-tuple (KAN-154): `(0x095ea7b3, token, [SpendingLimits])`,
+`(0x87517c45, Permit2, [TimeFrame])`, `(0x3593564c, router, [TimeFrame])`. `verifyGrant` recomputes
+`getPermissionId({ session })` from the decoded tuple → MUST equal `0x1c3f76fa…`. Rebuild (preferred) by
+re-encoding the expected `Session` with the same ABI and asserting the `call[1]` callData byte-matches.
+
 ## (c) `userOpHash` recompute (the security-critical part)
 EntryPoint **v0.7**, address `0x0000000071727De22E5E9d8BAf0edAc6f37da032`. Compute exactly as viem's
 `getUserOperationHash({ userOperation, entryPointAddress, entryPointVersion: "0.7", chainId })`:
