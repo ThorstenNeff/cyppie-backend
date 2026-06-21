@@ -7,6 +7,7 @@ import {
 } from "@rhinestone/module-sdk";
 import { toHex, encodePacked, type Address, type Hex } from "viem";
 import { KeychainSessionKeySigner, type SessionKeySigner } from "./sessionKeySigner.js";
+import { adapterFor, type RequiredAction } from "./swapAdapter.js";
 import type { SupportedChainId } from "./addresses.js";
 
 /**
@@ -28,6 +29,11 @@ export interface CopyScope {
   windowEnd: number; // validUntil (unix s)
   follower: Address; // the follower SCA (= owner EOA, 7702 same-address)
   source: Address; // the followed trader address
+  // ── Mirror-time swap params (copy-direction + slippage). NOT part of the on-chain action set, so they do
+  //    NOT change the permissionId/enable digest — they only shape the router.execute calldata at mirror time. ──
+  tokenOut?: Address; // what the follower buys (the copy-direction; the input leg alone doesn't determine it)
+  feeTier?: number;   // Uniswap V3 pool fee for the mirror swap (e.g. 500 / 3000 / 10000)
+  slippageBps?: number; // max slippage for amountOutMin (against a quote); absent ⇒ no on-chain slippage floor
 }
 
 /** The ENABLE inputs the app builds the Smart-Session enable from (it adds its owner account + the nonce). */
@@ -56,29 +62,62 @@ const APPROVE_SELECTOR: Hex = "0x095ea7b3";
  *    (UnsupportedPolicy 0x6a01dd01) AND reverts at USE on a non-token action like a router multicall
  *    (PolicyViolation 0x3b577361). The cap therefore sits as the ACTION policy on the spend-TOKEN's
  *    `approve` — capping what the router can pull (the account's own spend authorization).
- *  - The TimeFrame WINDOW goes in `userOpPolicies` (it implements `IUserOpPolicy`); the swap is a SEPARATE
- *    time-boxed router action. Two actions: [token.approve (cap), router.swap (window)].
+ *  - The TimeFrame WINDOW goes in `userOpPolicies` (it implements `IUserOpPolicy`); the swap legs are SEPARATE
+ *    time-boxed actions.
+ *
+ * C6: the enabled action set is driven by the ROUTER'S swap adapter ({@link adapterFor}.requiredActions) — the
+ * SAME source of truth as the mirror calls — so the session enables exactly the (target, selector)s the backend
+ * will later submit (a UniversalRouter mirror = 3 actions: token.approve cap → Permit2.approve → router.execute).
+ * A router with no registered adapter (test/dummy routers, e.g. the C3/C4 proofs) falls back to the legacy
+ * 2-action shape [token.approve (cap), router.<scope.selector> (window)].
  */
-export function assembleEnableInputs(sessionPublicKey: Address, salt: Hex, scope: CopyScope): EnableInputs {
+/**
+ * The module-sdk `Session` object for a session key + scope — the SINGLE definition of the on-chain session.
+ * Used for the permissionId, the app's ENABLE digest, AND (C6) the ENABLE-mode-on-first-use enable data, so all
+ * three are byte-identical. Action set is adapter-driven (see {@link assembleEnableInputs}).
+ */
+export function buildSession(sessionPublicKey: Address, salt: Hex, scope: CopyScope) {
   const ov = getOwnableValidator({ threshold: 1, owners: [sessionPublicKey] });
   const spend = getSpendingLimitsPolicy([{ token: scope.token, limit: scope.capTotalBudget }]);
   const time = getTimeFramePolicy({ validAfter: scope.windowStart, validUntil: scope.windowEnd });
   const timePolicy = { policy: time.policy as Address, initData: time.initData as Hex };
-  const session = {
+  const capPolicy = { policy: spend.policy as Address, initData: spend.initData as Hex };
+  const adapter = adapterFor(scope.router);
+  const required: RequiredAction[] = adapter
+    ? adapter.requiredActions({ token: scope.token, router: scope.router })
+    : [
+        { actionTarget: scope.token, actionTargetSelector: APPROVE_SELECTOR, policy: "cap" },
+        { actionTarget: scope.router, actionTargetSelector: scope.selector, policy: "window" },
+      ];
+  const actions = required.map((a) => ({
+    actionTargetSelector: a.actionTargetSelector,
+    actionTarget: a.actionTarget,
+    actionPolicies: [a.policy === "cap" ? capPolicy : timePolicy],
+  }));
+  return {
     sessionValidator: ov.address as Address,
     sessionValidatorInitData: ov.initData as Hex,
     salt,
     userOpPolicies: [timePolicy], // TimeFrame (IUserOpPolicy): the window
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
-    actions: [
-      // cap: SpendingLimits on the spend-token approve (IActionPolicy) — caps what the router can pull
-      { actionTargetSelector: APPROVE_SELECTOR, actionTarget: scope.token, actionPolicies: [{ policy: spend.policy as Address, initData: spend.initData as Hex }] },
-      // swap: the copy-router call, time-boxed (separate action)
-      { actionTargetSelector: scope.selector, actionTarget: scope.router, actionPolicies: [timePolicy] },
-    ],
+    actions,
     permitERC4337Paymaster: true as const,
     chainId: BigInt(scope.chainId),
   };
+}
+
+/** Reconstruct the module-sdk `Session` from a stored record (the scope + session key). */
+export function sessionFromRecord(r: CopyRecord) {
+  const scope: CopyScope = {
+    chainId: r.scope.chainId as SupportedChainId, token: r.scope.token, capTotalBudget: BigInt(r.scope.capTotalBudget),
+    router: r.scope.router, selector: r.scope.selector, windowStart: r.scope.windowStart, windowEnd: r.scope.windowEnd,
+    follower: r.scope.follower, source: r.scope.source,
+  };
+  return buildSession(r.sessionPublicKey, r.salt, scope);
+}
+
+export function assembleEnableInputs(sessionPublicKey: Address, salt: Hex, scope: CopyScope): EnableInputs {
+  const session = buildSession(sessionPublicKey, salt, scope);
   const permissionId = getPermissionId({ session }) as Hex;
   return {
     sessionPublicKey, sessionValidator: session.sessionValidator, sessionValidatorInitData: session.sessionValidatorInitData,
@@ -127,7 +166,7 @@ export interface CopyRecord {
   permissionId: Hex;
   sessionPublicKey: Address;
   keychainAccount: string; // the Keychain item account holding the private key
-  scope: { chainId: number; token: Address; capTotalBudget: string; router: Address; selector: Hex; windowStart: number; windowEnd: number; follower: Address; source: Address };
+  scope: { chainId: number; token: Address; capTotalBudget: string; router: Address; selector: Hex; windowStart: number; windowEnd: number; follower: Address; source: Address; tokenOut?: Address; feeTier?: number; slippageBps?: number };
   salt: Hex;
   status: CopyStatus;
   enableSignature?: Hex; // the owner-signed enable, included (ENABLE-mode) in the first mirror op

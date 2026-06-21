@@ -6,6 +6,7 @@ import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type 
 import { defaultRegistry, GateError, type CopyScope } from "./copySession.js";
 import { submitMirror } from "./mirror.js";
 import { verifyAlchemySignature, parseFollowedSpends, scaleMirror } from "./copyWebhook.js";
+import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
 
 const copyRegistry = defaultRegistry();
 
@@ -47,7 +48,18 @@ function requireChain(v: unknown): SupportedChainId {
   return id as SupportedChainId;
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+/**
+ * The `amountOutMin` (slippage floor) for a mirror swap, FAIL-CLOSED. On Base Sepolia (84532, testnet, no MEV) a
+ * 0 floor is acceptable for the wiring/E2E proof. On mainnet a real floor needs a quote (QuoterV2 × slippageBps)
+ * — NOT yet wired — so we return `null` and the webhook SKIPS the mirror rather than submit with no slippage
+ * protection. Wiring the quote is the C6 DEX-safety follow-up that unblocks mainnet mirrors.
+ */
+function minOutFor(chainId: number, _slippageBps?: number): bigint | null {
+  if (chainId === 84532) return 0n;
+  return null;
+}
+
+export async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = req.url ?? "/";
   const method = req.method ?? "GET";
 
@@ -148,9 +160,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return send(res, 200, { userOpHash, permissionId });
   }
 
-  // Copy-Trading detection (C5): Alchemy Address-Activity push → HMAC-verify (fail-closed) → parse followed
-  // source→router spends → fan out to following sessions → scale → SubmitGate verdict. Returns the gated mirror
-  // PLAN; building the per-router swap calls + the gated submit (with ENABLE-mode-on-first-use) is C6.
+  // Copy-Trading detection + gated submit (C5 + C6): Alchemy Address-Activity push → HMAC-verify (fail-closed) →
+  // parse followed source→router spends → fan out to following sessions → scale → SubmitGate → build the
+  // per-router swap calls (swapAdapter) → submitMirror (USE-mode, the on-chain policies are the hard bound) →
+  // record (Q7 + idempotency). Each mirror is fail-closed and independent (one bad mirror never sinks the batch).
   if (method === "POST" && url === "/v1/copy/webhook") {
     const raw = await readRaw(req);
     const sig = req.headers["x-alchemy-signature"] as string | undefined;
@@ -163,12 +176,27 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const mirrors: Array<Record<string, unknown>> = [];
     for (const s of spends) {
       for (const r of copyRegistry.findBySource(s.source, s.chainId)) {
-        const remainingCap = BigInt(r.scope.capTotalBudget) - BigInt(r.spentTotal ?? "0");
-        const amount = scaleMirror(s.amountIn, 10_000, remainingCap); // Q-B: fixed-cap match, clamped to the cap
-        if (amount <= 0n) continue;
-        let gate = "ok";
-        try { copyRegistry.assertMirrorable(r.permissionId, amount, s.sourceTxHash); } catch (e) { gate = e instanceof Error ? e.message : String(e); }
-        mirrors.push({ permissionId: r.permissionId, tokenIn: s.tokenIn, amount: amount.toString(), sourceTxHash: s.sourceTxHash, router: s.router, gate });
+        const base: Record<string, unknown> = { permissionId: r.permissionId, tokenIn: s.tokenIn, sourceTxHash: s.sourceTxHash, router: s.router };
+        try {
+          const remainingCap = BigInt(r.scope.capTotalBudget) - BigInt(r.spentTotal ?? "0");
+          const amount = scaleMirror(s.amountIn, 10_000, remainingCap); // Q-B: fixed-cap match, clamped to the cap
+          base.amount = amount.toString();
+          if (amount <= 0n) { mirrors.push({ ...base, status: "skipped", reason: "cap exhausted or zero" }); continue; }
+          if (!r.scope.tokenOut || !r.scope.feeTier) { mirrors.push({ ...base, status: "skipped", reason: "no copy-direction (tokenOut/feeTier)" }); continue; }
+          const amountOutMin = minOutFor(s.chainId, r.scope.slippageBps);
+          if (amountOutMin === null) { mirrors.push({ ...base, status: "skipped", reason: "no slippage floor (needs quote on mainnet)" }); continue; } // fail-closed: never mirror blind on slippage
+          copyRegistry.assertMirrorable(r.permissionId, amount, s.sourceTxHash); // GATE first (throws GateError → caught below)
+          const plan: MirrorPlan = {
+            chainId: s.chainId, router: s.router, tokenIn: s.tokenIn, tokenOut: r.scope.tokenOut,
+            amountIn: amount, amountOutMin, feeTier: r.scope.feeTier, deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
+          };
+          const calls = buildMirrorCalls(plan);
+          const { userOpHash } = await submitMirror(r, copyRegistry.signerFor(r.permissionId), calls);
+          copyRegistry.recordMirror(r.permissionId, amount, s.sourceTxHash); // Q7 + idempotency AFTER a successful submit
+          mirrors.push({ ...base, status: "submitted", userOpHash });
+        } catch (e) {
+          mirrors.push({ ...base, status: e instanceof GateError ? "gated" : "error", reason: e instanceof Error ? e.message : String(e) });
+        }
       }
     }
     return send(res, 200, { detected: spends.length, mirrors });
@@ -191,7 +219,11 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch((e) => {
-  console.error("aa-trigger failed to start:", e);
-  process.exit(1);
-});
+// Only boot the listener when run as the entry point — importing this module (e.g. the C6 E2E driving `handle`
+// in-process) must NOT start the server or the on-chain address gate.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((e) => {
+    console.error("aa-trigger failed to start:", e);
+    process.exit(1);
+  });
+}

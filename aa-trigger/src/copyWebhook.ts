@@ -22,6 +22,15 @@ export function isAllowlistedRouter(chainId: number, router: string): boolean {
 }
 
 /**
+ * TEST-ONLY: allowlist an extra router for an E2E (e.g. a no-code test router so the full pipeline can land a
+ * receipt without DEX liquidity). Production routers live in the static ROUTER_ALLOWLIST above; the `__` prefix
+ * marks this test-only — never call it on a production code path.
+ */
+export function __allowTestRouter(chainId: number, router: string): void {
+  (ROUTER_ALLOWLIST[chainId] ??= new Set()).add(router.toLowerCase());
+}
+
+/**
  * Verify the Alchemy webhook HMAC (`x-alchemy-signature` = hex HMAC-SHA256 of the RAW body with the webhook's
  * signing key). Fail-closed: missing key/signature or any length/》value mismatch ⇒ false. Timing-safe compare.
  */

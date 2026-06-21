@@ -46,11 +46,15 @@ ok(inputs.sessionValidator.toLowerCase() === "0x000000000013fdb5234e4e3162a810f5
 // IActionPolicy that parses an ERC-20 transfer/approve → the cap sits on the spend-TOKEN's approve action, and
 // the router swap is a SEPARATE time-boxed action. SpendingLimits in userOpPolicies / on the router reverts.
 ok(inputs.userOpPolicies[0].policy.toLowerCase() === "0x0000000000d30f611fa3bf652ac6879428586930", "TimeFrame = userOp policy (GLOBAL_CONSTANTS)");
-ok(inputs.actions.length === 2, "two actions: [token.approve cap, router.swap window]");
+// C6: the scope router is the (allowlisted) UniversalRouter → the swap adapter drives a THREE-action shape that
+// matches the mirror calls byte-for-byte: token.approve (cap) → Permit2.approve (window) → router.execute (window).
+ok(inputs.actions.length === 3, "three actions: [token.approve cap, Permit2.approve window, router.execute window]");
 ok(inputs.actions[0].actionTargetSelector === "0x095ea7b3" && inputs.actions[0].actionTarget.toLowerCase() === scope.token.toLowerCase(), "cap action = approve on the spend token");
 ok(inputs.actions[0].actionPolicies[0].policy.toLowerCase() === "0x000000000033212e272655d8a22402db819477a6", "SpendingLimits = the cap action policy (GLOBAL_CONSTANTS)");
-ok(inputs.actions[1].actionTarget.toLowerCase() === scope.router.toLowerCase() && inputs.actions[1].actionTargetSelector === scope.selector, "swap action = the copy router/selector");
-ok(inputs.actions[1].actionPolicies[0].policy.toLowerCase() === "0x0000000000d30f611fa3bf652ac6879428586930", "TimeFrame = the swap action window");
+ok(inputs.actions[1].actionTargetSelector === "0x87517c45" && inputs.actions[1].actionTarget.toLowerCase() === "0x000000000022d473030f116ddee9f6b43ac78ba3", "Permit2 action = Permit2.approve on the Permit2 contract");
+ok(inputs.actions[1].actionPolicies[0].policy.toLowerCase() === "0x0000000000d30f611fa3bf652ac6879428586930", "TimeFrame = the Permit2 action window");
+ok(inputs.actions[2].actionTarget.toLowerCase() === scope.router.toLowerCase() && inputs.actions[2].actionTargetSelector === "0x3593564c", "swap action = UniversalRouter.execute");
+ok(inputs.actions[2].actionPolicies[0].policy.toLowerCase() === "0x0000000000d30f611fa3bf652ac6879428586930", "TimeFrame = the swap action window");
 
 // Build the full SignedSession the app would build (owner + nonce) and recompute both ways.
 const signedSession = {
