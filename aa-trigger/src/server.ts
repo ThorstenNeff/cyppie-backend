@@ -155,6 +155,11 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       router: b.router as Address, selector: b.selector as Hex,
       windowStart: Number(b.windowStart), windowEnd: Number(b.windowEnd),
       follower: b.follower as Address, source: b.source as Address,
+      // Copy-direction + allocation (mirror-time params; do NOT affect the permissionId/enable digest). The
+      // webhook needs tokenOut+feeTier to mirror at all; allocationBps defaults to full-match (10_000).
+      tokenOut: b.tokenOut as Address | undefined, feeTier: b.feeTier !== undefined ? Number(b.feeTier) : undefined,
+      slippageBps: b.slippageBps !== undefined ? Number(b.slippageBps) : undefined,
+      allocationBps: b.allocationBps !== undefined ? Number(b.allocationBps) : undefined,
     };
     return send(res, 200, copyRegistry.prepare(scope));
   }
@@ -274,7 +279,7 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
             mirrors.push({ ...base, status: "skipped", reason: "spend token/router not in session scope" }); continue;
           }
           const remainingCap = BigInt(r.scope.capTotalBudget) - BigInt(r.spentTotal ?? "0");
-          const amount = scaleMirror(s.amountIn, 10_000, remainingCap); // Q-B: fixed-cap match, clamped to the cap
+          const amount = scaleMirror(s.amountIn, r.scope.allocationBps ?? 10_000, remainingCap); // % allocation (default full-match), clamped to the cap
           base.amount = amount.toString();
           if (amount <= 0n) { mirrors.push({ ...base, status: "skipped", reason: "cap exhausted or zero" }); continue; }
           if (!r.scope.tokenOut || !r.scope.feeTier) { mirrors.push({ ...base, status: "skipped", reason: "no copy-direction (tokenOut/feeTier)" }); continue; }

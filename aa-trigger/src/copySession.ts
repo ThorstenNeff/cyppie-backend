@@ -34,6 +34,7 @@ export interface CopyScope {
   tokenOut?: Address; // what the follower buys (the copy-direction; the input leg alone doesn't determine it)
   feeTier?: number;   // Uniswap V3 pool fee for the mirror swap (e.g. 500 / 3000 / 10000)
   slippageBps?: number; // max slippage for amountOutMin (against a quote); absent ⇒ no on-chain slippage floor
+  allocationBps?: number; // % of each source spend to mirror (bps; default 10_000 = full match, clamped to cap)
 }
 
 /** The ENABLE inputs the app builds the Smart-Session enable from (it adds its owner account + the nonce). */
@@ -166,7 +167,7 @@ export interface CopyRecord {
   permissionId: Hex;
   sessionPublicKey: Address;
   keychainAccount: string; // the Keychain item account holding the private key
-  scope: { chainId: number; token: Address; capTotalBudget: string; router: Address; selector: Hex; windowStart: number; windowEnd: number; follower: Address; source: Address; tokenOut?: Address; feeTier?: number; slippageBps?: number };
+  scope: { chainId: number; token: Address; capTotalBudget: string; router: Address; selector: Hex; windowStart: number; windowEnd: number; follower: Address; source: Address; tokenOut?: Address; feeTier?: number; slippageBps?: number; allocationBps?: number };
   salt: Hex;
   status: CopyStatus;
   createdAt?: number; // unix s when the session was provisioned (prepare) — "following since" fallback

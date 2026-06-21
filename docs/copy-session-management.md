@@ -4,6 +4,28 @@
 > C-series `CopySessionRegistry` + the proven `/v1/userop/build`+`/submit` primitives. Final response shape pins
 > with Dev-1 at integration. Loopback-only (the Kotlin User-Service is the caller; it has the user JWT).
 
+## 0. Create-follow = `POST /v1/copy/session/prepare` (no separate create-follow endpoint)
+The App goes from (trader + budget + chain + allocation + copy-direction) to a session by calling **`prepare`
+directly with the scope** — the prepared session (its `permissionId`) IS the follow handle. There is no separate
+create-follow endpoint. Request body:
+```
+{ chainId,
+  source,            // ← the followed Trader (S1)
+  capTotalBudget,    // ← Budget cap (S2), cumulative, in `token` (decimal string)
+  token,             // the spend-budget token
+  follower,          // the follower SCA (= owner EOA, 7702 same-address)
+  router, selector,  // the allowlisted DEX router + swap selector (UniversalRouter / 0x3593564c)
+  windowStart, windowEnd,        // session validity window (unix s)
+  tokenOut, feeTier,             // copy-direction (what to buy + V3 pool fee) — REQUIRED for the webhook to mirror
+  allocationBps?,    // ← Allocation: % of each source spend to mirror (bps; default 10_000 = full match, cap-clamped)
+  slippageBps? }     // slippage tolerance for amountOutMin (mainnet gate)
+```
+Response = the **EnableInputs** (sessionPublicKey, sessionValidator, sessionValidatorInitData, salt,
+userOpPolicies, **actions**, permissionId, smartSession) the App feeds into the enable build (see
+`copy-trading-enable-submit-contract.md`). `tokenOut`/`feeTier`/`slippageBps`/`allocationBps` are mirror-time
+params — they do NOT affect the `permissionId`/enable digest. Then: build+owner-sign+submit the enable
+(approach B) → `POST /v1/copy/session/grant {permissionId}` marks it active.
+
 ## 1. Active list — `GET /v1/copy/sessions?follower=0x…`
 Returns the follower's **granted** (active or paused) copy sessions as the UX rows — `prepared` (not yet enabled)
 and `revoked` (ended) are excluded. Response:
