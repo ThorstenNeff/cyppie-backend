@@ -25,8 +25,10 @@
 - `digestToSign`: `= hashMessage({ raw: userOpHash })` (EIP-191) — the 32 bytes the owner RAW-signs (§d).
 - `authorizationToSign?`: present only when the SCA isn't yet 7702-upgraded — `{ chainId, address: <Kernel impl>, nonce }`. Sign it as an EIP-7702 authorization and pass it on the FIRST op.
 
-## (b) `userOp.callData` = two self-calls (install + enable)  — what `verifyGrant` decodes
-The Kernel `callData` is the account's batch-execute of EXACTLY these two calls (both `to = sender = follower SCA`):
+## (b) `userOp.callData` = a 2-call batch (install + enable)  — what `verifyGrant` decodes
+The Kernel `callData` is the account's batch-execute of EXACTLY these two calls. Targets DIFFER:
+`call[0].to == sender` (the follower SCA — `installModule` on self); `call[1].to == 0x00000000008bDABA73cD9815d79069c247Eb4bDA`
+(the SmartSessions module — `enableSessions` on the module). The userOp `sender` is the follower SCA in both:
 1. **installModule** — `installModule(uint256 moduleTypeId=1, address module=SMART_SESSIONS_ADDRESS, bytes initData)`
    where, for **Kernel v3.3**, `initData = abi.encodePacked(hook, abi.encode(validatorData, hookData, selectorData))`:
    - `hook = 0x0000000000000000000000000000000000000001` (no-hook sentinel)
