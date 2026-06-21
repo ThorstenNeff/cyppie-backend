@@ -58,6 +58,13 @@ after it the session is gone on-chain: no further mirror is possible, and the re
 The off-chain `pause`/`resume` (`/v1/copy/session/pause|resume`) remain the instant kill-switch (mirrors stop
 immediately via the SubmitGate); revoke is the permanent on-chain end.
 
+**`verifyRevokeUserOp` vector (KAN-157, no-blind):** `removeSession` is a single Kernel-root op, so the App
+recomputes the userOpHash + verifies the calldata before the owner signs. `scripts/revoke-userop-vector.mjs`
+emits the canonical PackedUserOperation + userOpHash + digestToSign (single call → `SmartSessions.removeSession(
+permissionId)`; permissionId is the verify INPUT, example `0x1c3f76fa…`; sender `0xf39F…2266`, nonce 0):
+- **ETH(1):** `userOpHash 0x5fbcdaa3ed2713784493834ce101458ebdd0e1f1d13ec757aa9e6e7cd8f24bc0` · `digestToSign 0x955f183aea16d3003d25406bed8bf4b835eef026b096506b30745fcd011f4ea9`
+- **Base(8453):** `userOpHash 0x3ad2adb8a4465e9dce47d5795bb4455f31cda3d52a34d97bbb4a2424dc782ec5` · `digestToSign 0xccc72c94a0462389a3dc32a0c5d95f5bc2fee566766a53fca336545a4a542810`
+
 ## Proof (Base Sepolia, `c7-revoke-e2e.mjs`, through production code)
 prepare → enable → grant → **pre-revoke USE mirror succeeds** (`0x33bc34b2…`) → `revoke/build` (removeSession) →
 owner raw-signs `digestToSign` → `revoke/submit` → **REVOKE receipt `0xbd7ee57b…`** → **`isSessionEnabled == false`**
