@@ -4,8 +4,8 @@ import { PORT, HOST } from "./config.js";
 import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, type SupportedChainId } from "./addresses.js";
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
 import { defaultRegistry, GateError, sessionFromRecord, type CopyScope, type CopyRecord } from "./copySession.js";
-import { submitMirror } from "./mirror.js";
-import { verifyAlchemySignature, parseFollowedSpends, scaleMirror } from "./copyWebhook.js";
+import { submitMirror, waitMirrorOutcome } from "./mirror.js";
+import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey } from "./copyWebhook.js";
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
 
 const copyRegistry = defaultRegistry();
@@ -61,6 +61,22 @@ function minOutFor(chainId: number, _slippageBps?: number): bigint | null {
 
 const ERC20_APPROVE_SELECTOR = "0x095ea7b3";
 const selectorOf = (data?: Hex): string => (data ?? "0x").slice(0, 10).toLowerCase();
+
+/**
+ * P2-1 (KAN-156): confirm-then-record. After a bundler-accept, settle the reservation on the ON-CHAIN outcome:
+ * commit (charge Q7 + persist idempotency) only on success; release (charge nothing) on revert; on a confirm
+ * timeout LEAVE it reserved (conservatively holds the cap) + log for reconcile — never under-count a maybe-landed
+ * op (which would risk a within-cap double-mirror). Runs in the background so the webhook responds promptly.
+ */
+function settleMirror(permissionId: string, chainId: number, userOpHash: Hex, spend: bigint, key: string): void {
+  void waitMirrorOutcome(chainId as 1 | 8453 | 84532, userOpHash)
+    .then((outcome) => {
+      if (outcome === "success") copyRegistry.commitReservation(permissionId, spend, key);
+      else if (outcome === "reverted") copyRegistry.releaseReservation(permissionId, spend, key);
+      else console.warn(`[mirror] confirm pending after timeout — reservation LEFT booked for reconcile: ${permissionId} ${key} ${userOpHash}`);
+    })
+    .catch((e) => { copyRegistry.releaseReservation(permissionId, spend, key); console.error("[mirror] settle error:", e instanceof Error ? e.message : e); });
+}
 
 /** P1-3 (KAN-156): the set of `target:selector` the session ENABLED (from the adapter-driven action set). */
 function enabledActionKeys(record: CopyRecord): Set<string> {
@@ -141,11 +157,13 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     };
     return send(res, 200, copyRegistry.prepare(scope));
   }
-  // Record the owner-signed enable for a prepared session (included ENABLE-mode in the first mirror op).
+  // Mark a prepared session active once the owner has broadcast the on-chain enable (approach B): the App
+  // built + owner-signed + submitted the install+enableSessions op via /v1/userop/build + /v1/userop/submit.
+  // No enable signature is stored (the owner's authority is that userOp's signature itself).
   if (method === "POST" && url === "/v1/copy/session/grant") {
     const b = await readJson(req);
-    if (!b.permissionId || !b.enableSignature) throw new BadRequest("missing permissionId or enableSignature");
-    const r = copyRegistry.grant(b.permissionId as string, b.enableSignature as Hex);
+    if (!b.permissionId) throw new BadRequest("missing permissionId");
+    const r = copyRegistry.grant(b.permissionId as string);
     return send(res, 200, { permissionId: r.permissionId, status: r.status });
   }
 
@@ -180,12 +198,12 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     // P1-3: derive the Q7 spend from the calls (not caller-declared); if a spend is passed it MUST equal the derived.
     const spend = deriveSpendFromCalls(calls, record.scope.token);
     if (b.spend !== undefined && BigInt(b.spend as string) !== spend) throw new BadRequest("declared spend != derived approve amount");
-    // P1-1: atomic reserve → submit (distinct nonce lane) → commit / release.
+    // P1-1: atomic reserve → submit (distinct nonce lane); P2-1: settle (commit/release) on on-chain inclusion.
     copyRegistry.reserve(permissionId, spend, sourceTxHash);
     const nonceKey = copyRegistry.nextNonceKey(record.scope.follower);
     try {
       const { userOpHash } = await submitMirror(record, copyRegistry.signerFor(permissionId), calls, nonceKey);
-      copyRegistry.commitReservation(permissionId, spend, sourceTxHash);
+      settleMirror(permissionId, record.scope.chainId, userOpHash, spend, sourceTxHash);
       return send(res, 200, { userOpHash, permissionId, spend: spend.toString() });
     } catch (e) {
       copyRegistry.releaseReservation(permissionId, spend, sourceTxHash);
@@ -225,7 +243,8 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
           if (!r.scope.tokenOut || !r.scope.feeTier) { mirrors.push({ ...base, status: "skipped", reason: "no copy-direction (tokenOut/feeTier)" }); continue; }
           const amountOutMin = minOutFor(s.chainId, r.scope.slippageBps);
           if (amountOutMin === null) { mirrors.push({ ...base, status: "skipped", reason: "no slippage floor (needs quote on mainnet)" }); continue; } // fail-closed: never mirror blind on slippage
-          copyRegistry.reserve(r.permissionId, amount, s.sourceTxHash); // P1-1: ATOMIC gate+reserve (throws GateError → caught below)
+          const key = spendKey(s); // P2-2: idempotency keyed (txHash, logIndex) — each leg of a multi-swap tx mirrors
+          copyRegistry.reserve(r.permissionId, amount, key); // P1-1: ATOMIC gate+reserve (throws GateError → caught below)
           const plan: MirrorPlan = {
             chainId: s.chainId, router: s.router, tokenIn: s.tokenIn, tokenOut: r.scope.tokenOut,
             amountIn: amount, amountOutMin, feeTier: r.scope.feeTier, deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
@@ -234,10 +253,10 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
           const nonceKey = copyRegistry.nextNonceKey(r.scope.follower); // P1-1: distinct nonce lane per concurrent op
           try {
             const { userOpHash } = await submitMirror(r, copyRegistry.signerFor(r.permissionId), calls, nonceKey);
-            copyRegistry.commitReservation(r.permissionId, amount, s.sourceTxHash); // Q7 + idempotency AFTER a successful submit
+            settleMirror(r.permissionId, s.chainId, userOpHash, amount, key); // P2-1: commit on on-chain inclusion, not bundler-accept
             mirrors.push({ ...base, status: "submitted", userOpHash });
           } catch (submitErr) {
-            copyRegistry.releaseReservation(r.permissionId, amount, s.sourceTxHash); // failed submit → charge nothing
+            copyRegistry.releaseReservation(r.permissionId, amount, key); // failed submit → charge nothing
             throw submitErr;
           }
         } catch (e) {

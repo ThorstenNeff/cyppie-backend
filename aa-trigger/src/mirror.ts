@@ -25,6 +25,24 @@ export const ENTRYPOINT_GETNONCE_ABI = [
   { type: "function", name: "getNonce", stateMutability: "view", inputs: [{ type: "address" }, { type: "uint192" }], outputs: [{ type: "uint256" }] },
 ] as const;
 
+/**
+ * P2-1 (KAN-156): poll a submitted mirror's on-chain OUTCOME so the registry charges on INCLUSION, not on
+ * bundler-accept. Returns "success" / "reverted" once a receipt lands, or "pending" after the window (the caller
+ * then leaves the reservation booked + logs for reconcile — never under-counts the cap on a maybe-landed op).
+ */
+export async function waitMirrorOutcome(
+  chainId: 1 | 8453 | 84532, userOpHash: Hex, { tries = 20, delayMs = 3000 }: { tries?: number; delayMs?: number } = {},
+): Promise<"success" | "reverted" | "pending"> {
+  const ctx = chainCtxFor(chainId);
+  const bundler = createBundlerClient({ chain: ctx.chain, transport: http(ctx.bundlerUrl) });
+  for (let i = 0; i < tries; i++) {
+    const r = await bundler.getUserOperationReceipt({ hash: userOpHash }).catch(() => null);
+    if (r) return r.success ? "success" : "reverted";
+    await new Promise((res) => setTimeout(res, delayMs));
+  }
+  return "pending";
+}
+
 export async function submitMirror(record: CopyRecord, signer: SessionKeySigner, calls: Call[], nonceKey = 0): Promise<{ userOpHash: Hex }> {
   const ctx: ChainCtx = chainCtxFor(record.scope.chainId as 1 | 8453 | 84532);
   const follower = record.scope.follower as Address;

@@ -1,6 +1,6 @@
 // C5 detection unit tests (KAN-149) — HMAC fail-closed + Alchemy parse + scale. Run: node copywebhook.test.mjs
 import { createHmac } from "node:crypto";
-import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, isAllowlistedRouter } from "./dist/copyWebhook.js";
+import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, isAllowlistedRouter, spendKey } from "./dist/copyWebhook.js";
 
 let fails = 0;
 const ok = (c, m) => { if (c) console.log("  ✓", m); else { console.log("  ✗", m); fails++; } };
@@ -54,6 +54,18 @@ let parsed;
 try { parsed = parseFollowedSpends(mixed, isFollowed); } catch { parsed = "THREW"; }
 ok(parsed !== "THREW", "malformed activity does not throw (no webhook 500 / retry storm)");
 ok(Array.isArray(parsed) && parsed.length === 1 && parsed[0].sourceTxHash === "0xgood", "the valid spend in the batch survives");
+
+console.log("P2-2 (KAN-156): idempotency key = (txHash, logIndex) — a multi-swap tx yields distinct legs");
+const multiLeg = { event: { network: "BASE_MAINNET", activity: [
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xmulti", rawContract: { address: TOKEN, rawValue: "0xf4240" }, log: { logIndex: "0x3" } },
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xmulti", rawContract: { address: TOKEN, rawValue: "0x1e8480" }, log: { logIndex: 7 } },
+] } };
+const legs = parseFollowedSpends(multiLeg, isFollowed);
+ok(legs.length === 2, `both legs of the same tx detected (got ${legs.length})`);
+ok(legs[0].logIndex === 3 && legs[1].logIndex === 7, "logIndex parsed (hex + number)");
+ok(spendKey(legs[0]) !== spendKey(legs[1]), "distinct idempotency keys for the two legs");
+ok(spendKey(legs[0]) === "0xmulti:3", `spendKey = txHash:logIndex (got ${spendKey(legs[0])})`);
+ok(spendKey({ sourceTxHash: "0xNOLOG", logIndex: 0 }) === "0xnolog:0", "no-log activity → logIndex 0");
 
 console.log("C5: scaleMirror — proportional, cap-clamped");
 ok(scaleMirror(1000000n, 5000, 10n ** 18n) === 500000n, "50% allocation");

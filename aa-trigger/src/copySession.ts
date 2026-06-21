@@ -169,7 +169,6 @@ export interface CopyRecord {
   scope: { chainId: number; token: Address; capTotalBudget: string; router: Address; selector: Hex; windowStart: number; windowEnd: number; follower: Address; source: Address; tokenOut?: Address; feeTier?: number; slippageBps?: number };
   salt: Hex;
   status: CopyStatus;
-  enableSignature?: Hex; // the owner-signed enable, included (ENABLE-mode) in the first mirror op
   // ── SubmitGate state (C4) ──
   paused?: boolean; // kill-switch: mirrors rejected while true (separate from on-chain revoke)
   spentTotal?: string; // Q7 backend accounting: cumulative mirrored spend (defense-in-depth on the on-chain cap)
@@ -235,12 +234,20 @@ export class CopySessionRegistry {
     return inputs;
   }
 
-  /** Record the owner-signed enable for a prepared session (→ `granted`); used in the first mirror op. */
-  grant(permissionId: string, enableSignature: Hex): CopyRecord {
+  /**
+   * Mark a prepared session active (→ `granted`) once the owner has broadcast the on-chain enable.
+   *
+   * Enable-submission = approach (B) (KAN-156 P1-4, PO-approved): the App builds the owner-present, one-time
+   * `installModule(SmartSessions) + enableSessions(session)` op via the EXISTING `/v1/userop/build`, the owner
+   * signs the userOpHash on-device (Kernel-root EIP-191), and submits via `/v1/userop/submit`. The owner's
+   * authority IS that userOp signature — there is no separately-stored enable signature to keep or verify
+   * (former `enableSignature` was dead data; P2-5 is moot under (B)). The backend only records the active state.
+   */
+  grant(permissionId: string): CopyRecord {
     const r = this.records.get(permissionId);
     if (!r) throw new Error(`unknown permissionId ${permissionId}`);
     if (r.status === "revoked") throw new Error("session revoked");
-    const updated: CopyRecord = { ...r, status: "granted", enableSignature };
+    const updated: CopyRecord = { ...r, status: "granted" };
     this.upsert(updated);
     return updated;
   }

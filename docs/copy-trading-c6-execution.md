@@ -93,15 +93,25 @@ Proven E2E (Base Sepolia) with all P1s live: webhook→receipt `0x83d42bec…` (
 P1-3 un-enabled-call→400 + bad-HMAC→401 + idempotent→gated + kill-switch→no-mirror. Unit: reserve/commit/release
 + in-flight cap + nonce-lane + malformed-activity drop.
 
-**P1-4 / P2-5 (enable-submission) — proposal:** cleanest path is **approach (B)** — the App builds the
-owner-present, one-time `installModule(SmartSessions) + enableSessions(session)` op via the EXISTING, proven
-`/v1/userop/build` → owner signs on-device → `/v1/userop/submit` (Kernel-root validated, EIP-191 digest = the DCA
-path). Under (B) the copy record's `enableSignature` is **dead → remove it**, and P2-5's crypto-verify is moot (the
-enable is a standard userOp, not a stored sig). The alternative — approach (A), smart-session ENABLE-mode-on-
-first-use — is the deferred FF-b (blocked on the ERC-7739 enable-sig digest). Needs a Dev-2 call before changing
-the grant API. **Remaining P2 (fast-follow):** P2-1 confirm-then-record; P2-2 idempotency `(sourceTxHash,
-logIndex)`; P2-4 move test-only `__registerTestAdapter`/`__allowTestRouter` off the prod bundle.
+**P1-4 / P2-5 (enable-submission) — DONE (approach B, PO-approved):** the App builds the owner-present, one-time
+`installModule(SmartSessions) + enableSessions(session)` op via the EXISTING, proven `/v1/userop/build` → owner
+signs the userOpHash on-device (Kernel-root EIP-191, `digestToSign = hashMessage(userOpHash)`) → `/v1/userop/submit`.
+The copy record's `enableSignature` is **removed (dead data)**; `grant(permissionId)` just marks the session active
+once the App reports the enable landed. **P2-5 is moot** — there is no separately-stored enable signature to verify;
+the owner's authority IS that userOp signature. (Approach (A), smart-session ENABLE-mode-on-first-use, remains the
+deferred FF-b, blocked on the ERC-7739 enable-sig digest.) The byte-exact enable-submit contract for Dev-2's
+`FollowGrantService` is in `docs/copy-trading-enable-submit-contract.md`.
 
-Status: C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ · C5 ✅ · **C6 ✅ (swap adapter + gated submit + webhook→receipt E2E)** · **KAN-156 P1s ✅**.
+**P2 hardening — DONE:**
+- **P2-1 · confirm-then-record:** `reserve` → submit → `settleMirror` (background) commits Q7+idempotency only on
+  on-chain SUCCESS, releases on revert, and LEAVES the reservation booked + logs on a confirm timeout (never
+  under-counts a maybe-landed op). The reservation holds the cap meanwhile.
+- **P2-2 · idempotency `(sourceTxHash, logIndex)`:** `spendKey` = `txHash:logIndex`, so each leg of a multi-swap
+  tx mirrors instead of only the first.
+- **P2-3 · webhook robustness:** per-activity try/continue (above).
+- **P2-4 · test-mutators fenced:** `__registerTestAdapter`/`__allowTestRouter` throw unless `COPY_TEST_HOOKS=1`
+  (E2E only) — they ship in the bundle but cannot mutate the prod allowlist/adapter singletons.
+
+Status: C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ · C5 ✅ · **C6 ✅ (swap adapter + gated submit + webhook→receipt E2E)** · **KAN-156 P1s + P2s ✅** (enable-submission = approach B).
 Fast-follows: (a) QuoterV2 slippage floor → mainnet mirrors; (b) ERC-7739 enable-sig → ENABLE-mode-on-first-use;
 (c) real-liquidity testnet swap (funded account + pool).

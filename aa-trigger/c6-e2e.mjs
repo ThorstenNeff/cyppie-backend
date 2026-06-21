@@ -43,6 +43,7 @@ const WEBHOOK_KEY = "whsec_c6_e2e";
 const home = mkdtempSync(join(tmpdir(), "cyppie-c6-"));
 process.env.CYPPIE_HOME = home;
 process.env.ALCHEMY_WEBHOOK_SIGNING_KEY = WEBHOOK_KEY;
+process.env.COPY_TEST_HOOKS = "1"; // P2-4: enable the test-only router/adapter mutators (inert/throws in prod)
 
 const { CopySessionRegistry } = await import("./dist/copySession.js");
 const regPath = join(home, "aa-trigger", "copy-sessions.json");
@@ -87,7 +88,7 @@ let enabled = false; for (let i = 0; i < 12 && !enabled; i++) { enabled = await 
 ok(enabled, "isSessionEnabled");
 
 // 3) grant (USE-mode: the registry marks granted; enableSig unused for USE).
-reg.grant(permissionId, "0x01");
+reg.grant(permissionId);
 
 // 4) import the REAL server handler (reads the granted session from CYPPIE_HOME) + register the test router.
 const { handle } = await import("./dist/server.js");

@@ -84,8 +84,8 @@ ok(rec?.permissionId === prepared.permissionId, "record permissionId matches ass
 // reload from disk -> persistence works
 reg = new CopySessionRegistry(path);
 ok(reg.get(prepared.permissionId)?.sessionPublicKey === prepared.sessionPublicKey, "registry persists across reload");
-const granted = reg.grant(prepared.permissionId, "0xdeadbeef");
-ok(granted.status === "granted" && reg.get(prepared.permissionId)?.enableSignature === "0xdeadbeef", "grant -> status granted + enableSig stored");
+const granted = reg.grant(prepared.permissionId); // approach B: no enable sig stored (owner authority = the userOp sig)
+ok(granted.status === "granted" && reg.get(prepared.permissionId)?.enableSignature === undefined, "grant -> status granted (no enableSignature stored)");
 const signer = reg.signerFor(prepared.permissionId);
 ok(signer.publicKeyAddress().toLowerCase() === prepared.sessionPublicKey.toLowerCase(), "signerFor resolves the session key (address matches)");
 console.log("C4: SubmitGate — kill-switch + Q7 exposure + idempotency (deterministic, no network)");

@@ -71,7 +71,7 @@ let enabled = false; for (let i = 0; i < 10 && !enabled; i++) { enabled = await 
 ok(enabled, "isSessionEnabled");
 
 // 3) grant → 4) SubmitGate → 5) submitMirror (the C4 production path).
-reg.grant(permissionId, "0x01");
+reg.grant(permissionId);
 const mirrorCall = { to: WETH, value: "0x0", data: encodeFunctionData({ abi: parseAbi(["function approve(address,uint256)"]), args: ["0x000000000000000000000000000000000000dEaD", 0n] }) };
 const spend = 10n ** 17n; // 0.1 WETH spend for this mirror (Q7 accounting)
 const src1 = "0xaaa1";

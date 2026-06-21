@@ -23,10 +23,13 @@ export function isAllowlistedRouter(chainId: number, router: string): boolean {
 
 /**
  * TEST-ONLY: allowlist an extra router for an E2E (e.g. a no-code test router so the full pipeline can land a
- * receipt without DEX liquidity). Production routers live in the static ROUTER_ALLOWLIST above; the `__` prefix
- * marks this test-only — never call it on a production code path.
+ * receipt without DEX liquidity). Production routers live in the static ROUTER_ALLOWLIST above.
+ *
+ * P2-4 (KAN-156): hard fail-closed in prod — mutates the SHARED production allowlist, so it throws unless
+ * `COPY_TEST_HOOKS=1` (E2E only). Ships in the bundle but cannot widen the prod allowlist.
  */
 export function __allowTestRouter(chainId: number, router: string): void {
+  if (process.env.COPY_TEST_HOOKS !== "1") throw new Error("__allowTestRouter is test-only (set COPY_TEST_HOOKS=1)");
   (ROUTER_ALLOWLIST[chainId] ??= new Set()).add(router.toLowerCase());
 }
 
@@ -49,8 +52,14 @@ export interface DetectedSpend {
   router: Address;        // the allowlisted DEX router (activity.toAddress)
   tokenIn: Address;       // the spent ERC-20 (activity.rawContract.address)
   amountIn: bigint;       // raw token amount spent
-  sourceTxHash: string;   // the source tx (idempotency key for the mirror)
+  sourceTxHash: string;   // the source tx hash
+  logIndex: number;       // the on-chain log index within the tx (P2-2: a multi-swap tx has distinct legs)
   chainId: number;
+}
+
+/** P2-2 (KAN-156): the idempotency key for a mirror — `txHash:logIndex`, so each leg of a multi-swap tx mirrors. */
+export function spendKey(s: { sourceTxHash: string; logIndex: number }): string {
+  return `${s.sourceTxHash.toLowerCase()}:${s.logIndex}`;
 }
 
 /** Alchemy network slug → chainId (the subset we mirror on). */
@@ -74,7 +83,7 @@ export function parseFollowedSpends(payload: unknown, isFollowed: (addr: string)
     try {
       const a = aRaw as {
         category?: string; fromAddress?: string; toAddress?: string; hash?: string;
-        rawContract?: { address?: string; rawValue?: string };
+        rawContract?: { address?: string; rawValue?: string }; log?: { logIndex?: string | number };
       };
       if (a.category !== "token") continue;                       // ERC-20 transfers only
       const { fromAddress: from, toAddress: to, hash } = a;
@@ -85,9 +94,11 @@ export function parseFollowedSpends(payload: unknown, isFollowed: (addr: string)
       if (!isAllowlistedRouter(chainId, to)) continue;            // must go to an allowlisted router
       const amountIn = BigInt(rawValue);
       if (amountIn <= 0n) continue;
+      const li = a.log?.logIndex;                                 // P2-2: on-chain log index (hex or number); 0 if absent
+      const logIndex = li != null && Number.isFinite(Number(li)) ? Number(li) : 0;
       out.push({
         source: getAddress(from), router: getAddress(to), tokenIn: getAddress(token),
-        amountIn, sourceTxHash: hash, chainId,
+        amountIn, sourceTxHash: hash, logIndex, chainId,
       });
     } catch {
       continue; // malformed activity — drop it, never let it sink the batch

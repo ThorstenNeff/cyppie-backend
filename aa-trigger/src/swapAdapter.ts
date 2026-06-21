@@ -134,10 +134,13 @@ export function adapterFor(router: Address): SwapAdapter | null {
 
 /**
  * TEST-ONLY: register an adapter for a router (e.g. a no-code test router) so the full webhook→submit path can be
- * exercised on-chain WITHOUT DEX liquidity. Production routers are registered in the static table above; this is
- * only for E2E harnesses (the `__` prefix marks it test-only — never call it on a production code path).
+ * exercised on-chain WITHOUT DEX liquidity. Production routers are registered in the static table above.
+ *
+ * P2-4 (KAN-156): hard fail-closed in prod — this mutates the SHARED production adapter singleton, so it throws
+ * unless `COPY_TEST_HOOKS=1` is set (E2E harnesses only). It ships in the bundle but cannot alter prod routing.
  */
 export function __registerTestAdapter(router: Address, adapter: SwapAdapter): void {
+  if (process.env.COPY_TEST_HOOKS !== "1") throw new Error("__registerTestAdapter is test-only (set COPY_TEST_HOOKS=1)");
   ADAPTERS[router.toLowerCase()] = adapter;
 }
 
