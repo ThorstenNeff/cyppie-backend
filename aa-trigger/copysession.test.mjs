@@ -105,6 +105,35 @@ console.log("C4: SubmitGate — kill-switch + Q7 exposure + idempotency (determi
   expectGate(() => reg.assertMirrorable(pid, 1n, "0xsrcD"), "revoked: rejected");
 }
 
+console.log("P1-1 (KAN-156): atomic reserve/commit/release + distinct nonce lanes (concurrency safety)");
+{
+  const expectGate = (fn, m) => { try { fn(); ok(false, m); } catch (e) { ok(e instanceof GateError, `${m}: ${e.message}`); } };
+  const rpath = path + ".p11";
+  rmSync(rpath, { force: true });
+  const r = new CopySessionRegistry(rpath);
+  const pid = "0x" + "11".repeat(32);
+  const follower = "0xabc0000000000000000000000000000000000abc";
+  r.upsert({
+    permissionId: pid, sessionPublicKey: "0x0000000000000000000000000000000000000001", keychainAccount: "x",
+    scope: { chainId: 84532, token: "0x4200000000000000000000000000000000000006", capTotalBudget: "1000",
+      router: "0x000000000000000000000000000000000000c0de", selector: "0x3593564c", windowStart: 0, windowEnd: 1893456000, follower, source: "0x1111111111111111111111111111111111111111" },
+    salt: "0x" + "00".repeat(32), status: "granted",
+  });
+  r.reserve(pid, 600n, "0xs1"); // books 600 in-flight (not yet committed)
+  expectGate(() => r.reserve(pid, 600n, "0xs2"), "in-flight exposure counts toward cap (600+600 > 1000)");
+  expectGate(() => r.reserve(pid, 1n, "0xs1"), "in-flight duplicate source rejected (idempotent across the await)");
+  r.releaseReservation(pid, 600n, "0xs1"); // failed submit → free the booking
+  ok(r.reserve(pid, 600n, "0xs2").permissionId === pid, "after release, a fresh reserve fits again");
+  r.commitReservation(pid, 600n, "0xs2"); // success → persist Q7 + idempotency
+  ok(BigInt(r.get(pid).spentTotal) === 600n, "commit persists spentTotal");
+  ok((r.get(pid).mirroredTx ?? []).includes("0xs2"), "commit records the idempotency key");
+  expectGate(() => r.reserve(pid, 1n, "0xs2"), "committed source rejected (idempotent)");
+  expectGate(() => r.reserve(pid, 500n, "0xs3"), "committed 600 + new 500 > cap rejected");
+  ok(r.reserve(pid, 400n, "0xs3").permissionId === pid, "committed 600 + 400 == cap allowed");
+  ok(r.nextNonceKey(follower) !== r.nextNonceKey(follower), "consecutive nonce lanes differ (no single-lane collision)");
+  rmSync(rpath, { force: true });
+}
+
 console.log("C3: USE-mode DIGEST-LOCK — session signs the RAW userOpHash (proven on Base Sepolia)");
 {
   const PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";

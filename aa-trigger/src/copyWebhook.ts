@@ -69,24 +69,29 @@ export function parseFollowedSpends(payload: unknown, isFollowed: (addr: string)
   if (!chainId) return [];
   const out: DetectedSpend[] = [];
   for (const aRaw of p.event?.activity ?? []) {
-    const a = aRaw as {
-      category?: string; fromAddress?: string; toAddress?: string; hash?: string;
-      rawContract?: { address?: string; rawValue?: string };
-    };
-    if (a.category !== "token") continue;                       // ERC-20 transfers only
-    const { fromAddress: from, toAddress: to, hash } = a;
-    const token = a.rawContract?.address;
-    const rawValue = a.rawContract?.rawValue;
-    if (!from || !to || !hash || !token || !rawValue) continue;
-    if (!isFollowed(from)) continue;                            // must originate from a followed trader
-    if (!isAllowlistedRouter(chainId, to)) continue;            // must go to an allowlisted router
-    let amountIn: bigint;
-    try { amountIn = BigInt(rawValue); } catch { continue; }
-    if (amountIn <= 0n) continue;
-    out.push({
-      source: getAddress(from), router: getAddress(to), tokenIn: getAddress(token),
-      amountIn, sourceTxHash: hash, chainId,
-    });
+    // P2-3 (KAN-156): guard EACH activity — one malformed entry (bad address → getAddress throws) must not 500 the
+    // webhook (→ Alchemy retry storm + the valid spends in the same batch lost). Drop the bad one, keep the rest.
+    try {
+      const a = aRaw as {
+        category?: string; fromAddress?: string; toAddress?: string; hash?: string;
+        rawContract?: { address?: string; rawValue?: string };
+      };
+      if (a.category !== "token") continue;                       // ERC-20 transfers only
+      const { fromAddress: from, toAddress: to, hash } = a;
+      const token = a.rawContract?.address;
+      const rawValue = a.rawContract?.rawValue;
+      if (!from || !to || !hash || !token || !rawValue) continue;
+      if (!isFollowed(from)) continue;                            // must originate from a followed trader
+      if (!isAllowlistedRouter(chainId, to)) continue;            // must go to an allowlisted router
+      const amountIn = BigInt(rawValue);
+      if (amountIn <= 0n) continue;
+      out.push({
+        source: getAddress(from), router: getAddress(to), tokenIn: getAddress(token),
+        amountIn, sourceTxHash: hash, chainId,
+      });
+    } catch {
+      continue; // malformed activity — drop it, never let it sink the batch
+    }
   }
   return out;
 }

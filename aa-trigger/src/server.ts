@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { Address, Hex } from "viem";
+import { decodeFunctionData, parseAbi, type Address, type Hex } from "viem";
 import { PORT, HOST } from "./config.js";
 import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, type SupportedChainId } from "./addresses.js";
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
-import { defaultRegistry, GateError, type CopyScope } from "./copySession.js";
+import { defaultRegistry, GateError, sessionFromRecord, type CopyScope, type CopyRecord } from "./copySession.js";
 import { submitMirror } from "./mirror.js";
 import { verifyAlchemySignature, parseFollowedSpends, scaleMirror } from "./copyWebhook.js";
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
@@ -57,6 +57,25 @@ function requireChain(v: unknown): SupportedChainId {
 function minOutFor(chainId: number, _slippageBps?: number): bigint | null {
   if (chainId === 84532) return 0n;
   return null;
+}
+
+const ERC20_APPROVE_SELECTOR = "0x095ea7b3";
+const selectorOf = (data?: Hex): string => (data ?? "0x").slice(0, 10).toLowerCase();
+
+/** P1-3 (KAN-156): the set of `target:selector` the session ENABLED (from the adapter-driven action set). */
+function enabledActionKeys(record: CopyRecord): Set<string> {
+  return new Set(sessionFromRecord(record).actions.map((a) => `${a.actionTarget.toLowerCase()}:${a.actionTargetSelector.toLowerCase()}`));
+}
+
+/** P1-3: derive the Q7 spend from the calls — the `approve(spender,amount)` on the scope's spend token (the cap action). */
+function deriveSpendFromCalls(calls: Call[], token: Address): bigint {
+  for (const c of calls) {
+    if (c.to.toLowerCase() === token.toLowerCase() && selectorOf(c.data) === ERC20_APPROVE_SELECTOR) {
+      const { args } = decodeFunctionData({ abi: parseAbi(["function approve(address,uint256)"]), data: c.data });
+      return args[1] as bigint;
+    }
+  }
+  throw new BadRequest("cannot derive spend: no approve(spender,amount) on the scope token in calls");
 }
 
 export async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -139,25 +158,39 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     return send(res, 200, { permissionId: r.permissionId, status: r.status, paused: !!r.paused });
   }
 
-  // Copy-Trading mirror trigger (C4): SubmitGate (kill-switch + Q7 + idempotency) → build USE-mode mirror,
-  // sign with the backend session key, submit. `calls` is the scaled mirror (built by the C5 webhook path);
-  // `spend` is the input-token amount for the Q7 accounting; `sourceTxHash` is the idempotency key.
+  // Copy-Trading mirror trigger (C4, loopback-only): the calls are VALIDATED against the session's enabled
+  // (target,selector) and the Q7 spend is DERIVED from them (P1-3) — the session key never signs arbitrary calls,
+  // and spend can't be under-declared. Then the atomic reserve→submit→commit path (P1-1).
   if (method === "POST" && url === "/v1/session/trigger") {
     const b = await readJson(req);
-    if (!b.permissionId || !b.calls || b.spend === undefined || !b.sourceTxHash) {
-      throw new BadRequest("missing permissionId, calls, spend or sourceTxHash");
-    }
+    if (!b.permissionId || !b.calls || !b.sourceTxHash) throw new BadRequest("missing permissionId, calls or sourceTxHash");
     const permissionId = b.permissionId as string;
-    const spend = BigInt(b.spend as string);
     const sourceTxHash = b.sourceTxHash as string;
     const callsIn = b.calls as Array<{ to: Address; value?: string; data?: Hex }>;
     if (callsIn.length === 0) throw new BadRequest("missing calls");
     const calls: Call[] = callsIn.map((c) => ({ to: c.to, value: BigInt(c.value ?? "0x0"), data: c.data ?? "0x" }));
-    // Gate FIRST (fail-closed, no spend until it passes), then sign+submit, then record (Q7 + idempotency).
-    const record = copyRegistry.assertMirrorable(permissionId, spend, sourceTxHash);
-    const { userOpHash } = await submitMirror(record, copyRegistry.signerFor(permissionId), calls);
-    copyRegistry.recordMirror(permissionId, spend, sourceTxHash);
-    return send(res, 200, { userOpHash, permissionId });
+    const record = copyRegistry.get(permissionId);
+    if (!record) throw new GateError(`unknown permissionId ${permissionId}`);
+    // P1-3: every call must target an ENABLED (target,selector) — no signing arbitrary calls with the session key.
+    const allowed = enabledActionKeys(record);
+    for (const c of calls) {
+      const key = `${c.to.toLowerCase()}:${selectorOf(c.data)}`;
+      if (!allowed.has(key)) throw new BadRequest(`call ${key} not in the session's enabled action set`);
+    }
+    // P1-3: derive the Q7 spend from the calls (not caller-declared); if a spend is passed it MUST equal the derived.
+    const spend = deriveSpendFromCalls(calls, record.scope.token);
+    if (b.spend !== undefined && BigInt(b.spend as string) !== spend) throw new BadRequest("declared spend != derived approve amount");
+    // P1-1: atomic reserve → submit (distinct nonce lane) → commit / release.
+    copyRegistry.reserve(permissionId, spend, sourceTxHash);
+    const nonceKey = copyRegistry.nextNonceKey(record.scope.follower);
+    try {
+      const { userOpHash } = await submitMirror(record, copyRegistry.signerFor(permissionId), calls, nonceKey);
+      copyRegistry.commitReservation(permissionId, spend, sourceTxHash);
+      return send(res, 200, { userOpHash, permissionId, spend: spend.toString() });
+    } catch (e) {
+      copyRegistry.releaseReservation(permissionId, spend, sourceTxHash);
+      throw e;
+    }
   }
 
   // Copy-Trading detection + gated submit (C5 + C6): Alchemy Address-Activity push → HMAC-verify (fail-closed) →
@@ -178,6 +211,13 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       for (const r of copyRegistry.findBySource(s.source, s.chainId)) {
         const base: Record<string, unknown> = { permissionId: r.permissionId, tokenIn: s.tokenIn, sourceTxHash: s.sourceTxHash, router: s.router };
         try {
+          // P1-2 (KAN-156): the event injects tokenIn/router; the session ENABLED its actions on scope.token /
+          // scope.router. A spend on any OTHER token/router would target an un-enabled (target,selector) → a
+          // guaranteed on-chain revert on a SPONSORED op (paymaster gas-drain). Skip BEFORE building/submitting —
+          // and it makes the scaled `amount` same-token (so the Q7 cap accounting is meaningful, P1-2 corollary).
+          if (s.tokenIn.toLowerCase() !== r.scope.token.toLowerCase() || s.router.toLowerCase() !== r.scope.router.toLowerCase()) {
+            mirrors.push({ ...base, status: "skipped", reason: "spend token/router not in session scope" }); continue;
+          }
           const remainingCap = BigInt(r.scope.capTotalBudget) - BigInt(r.spentTotal ?? "0");
           const amount = scaleMirror(s.amountIn, 10_000, remainingCap); // Q-B: fixed-cap match, clamped to the cap
           base.amount = amount.toString();
@@ -185,15 +225,21 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
           if (!r.scope.tokenOut || !r.scope.feeTier) { mirrors.push({ ...base, status: "skipped", reason: "no copy-direction (tokenOut/feeTier)" }); continue; }
           const amountOutMin = minOutFor(s.chainId, r.scope.slippageBps);
           if (amountOutMin === null) { mirrors.push({ ...base, status: "skipped", reason: "no slippage floor (needs quote on mainnet)" }); continue; } // fail-closed: never mirror blind on slippage
-          copyRegistry.assertMirrorable(r.permissionId, amount, s.sourceTxHash); // GATE first (throws GateError → caught below)
+          copyRegistry.reserve(r.permissionId, amount, s.sourceTxHash); // P1-1: ATOMIC gate+reserve (throws GateError → caught below)
           const plan: MirrorPlan = {
             chainId: s.chainId, router: s.router, tokenIn: s.tokenIn, tokenOut: r.scope.tokenOut,
             amountIn: amount, amountOutMin, feeTier: r.scope.feeTier, deadline: BigInt(Math.floor(Date.now() / 1000) + 600),
           };
           const calls = buildMirrorCalls(plan);
-          const { userOpHash } = await submitMirror(r, copyRegistry.signerFor(r.permissionId), calls);
-          copyRegistry.recordMirror(r.permissionId, amount, s.sourceTxHash); // Q7 + idempotency AFTER a successful submit
-          mirrors.push({ ...base, status: "submitted", userOpHash });
+          const nonceKey = copyRegistry.nextNonceKey(r.scope.follower); // P1-1: distinct nonce lane per concurrent op
+          try {
+            const { userOpHash } = await submitMirror(r, copyRegistry.signerFor(r.permissionId), calls, nonceKey);
+            copyRegistry.commitReservation(r.permissionId, amount, s.sourceTxHash); // Q7 + idempotency AFTER a successful submit
+            mirrors.push({ ...base, status: "submitted", userOpHash });
+          } catch (submitErr) {
+            copyRegistry.releaseReservation(r.permissionId, amount, s.sourceTxHash); // failed submit → charge nothing
+            throw submitErr;
+          }
         } catch (e) {
           mirrors.push({ ...base, status: e instanceof GateError ? "gated" : "error", reason: e instanceof Error ? e.message : String(e) });
         }

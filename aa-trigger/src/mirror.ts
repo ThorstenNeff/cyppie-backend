@@ -25,7 +25,7 @@ export const ENTRYPOINT_GETNONCE_ABI = [
   { type: "function", name: "getNonce", stateMutability: "view", inputs: [{ type: "address" }, { type: "uint192" }], outputs: [{ type: "uint256" }] },
 ] as const;
 
-export async function submitMirror(record: CopyRecord, signer: SessionKeySigner, calls: Call[]): Promise<{ userOpHash: Hex }> {
+export async function submitMirror(record: CopyRecord, signer: SessionKeySigner, calls: Call[], nonceKey = 0): Promise<{ userOpHash: Hex }> {
   const ctx: ChainCtx = chainCtxFor(record.scope.chainId as 1 | 8453 | 84532);
   const follower = record.scope.follower as Address;
   const publicClient = createPublicClient({ chain: ctx.chain, transport: http(ctx.publicRpc) });
@@ -44,7 +44,7 @@ export async function submitMirror(record: CopyRecord, signer: SessionKeySigner,
   // Route to the Smart Sessions validator (vtype=0x01); read the nonce from the EntryPoint directly.
   const nonce = await publicClient.readContract({
     address: entryPoint07Address, abi: ENTRYPOINT_GETNONCE_ABI, functionName: "getNonce",
-    args: [follower, smartSessionUseModeNonceKey()],
+    args: [follower, smartSessionUseModeNonceKey(nonceKey)], // P1-1: distinct lane per concurrent op for this follower
   });
   // Explicit generous gas (skips the mock-sig estimation the session-validator would hard-revert) + sponsored
   // paymaster data via the prepare path. The USE stub is a placeholder; replaced by the real sig below.

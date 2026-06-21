@@ -70,6 +70,38 @@ domain), then flip `submitMirror` to `encodeUseOrEnableSmartSessionSignature`.**
 - `c6-e2e.mjs` — the full webhook→receipt E2E (on-chain).
 - `c6-enable-probe.mjs` — the ENABLE-mode-on-first-use research probe (the finding above).
 
-Status: C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ · C5 ✅ · **C6 ✅ (swap adapter + gated submit + webhook→receipt E2E)**.
+## KAN-156 — security hardening (integration P1s, post-review)
+
+Following the Copy-Trading integration security review (no P0 drain; on-chain policies hold). P1 fixes, all tested:
+- **P1-2 · enable↔use scope filter:** the webhook now SKIPS a detected spend where `tokenIn !== scope.token` or
+  `router !== scope.router` BEFORE building/submitting — an off-scope trade would target an un-enabled
+  (target,selector) → guaranteed on-chain revert on a *sponsored* op (paymaster gas-drain). Closes the gap that
+  the calldata *shape* is single-source but the *which token/router* was event-injected.
+- **P1-1 · concurrency + nonce lanes:** `reserve()` (atomic, synchronous gate+book) → `submitMirror` →
+  `commitReservation`/`releaseReservation`. In-flight spend counts toward the cap + the idempotency set, so two
+  concurrent Alchemy deliveries can't both pass across the `await`. Each concurrent op gets a DISTINCT EntryPoint
+  nonce lane (`nextNonceKey`) — no single-lane (`nonceKey=0`) collision (on-chain `getNonce` lags pending ops).
+- **P1-3 · trigger hardening:** `/v1/session/trigger` validates every call against the session's enabled
+  (target,selector) set and DERIVES `spend` from the calls (the cap `approve` amount) instead of a caller-declared
+  spend; loopback-only retained.
+- **P1-5 · key via stdin:** `provision` feeds the session private key to `security add-generic-password` via STDIN
+  (not `-w <value>` in argv → no longer visible in `ps`).
+- **P2-3 · webhook robustness:** `parseFollowedSpends` guards each activity (try/continue) — one malformed entry
+  can't 500 the webhook (Alchemy retry storm) or drop the valid spends in the same batch.
+
+Proven E2E (Base Sepolia) with all P1s live: webhook→receipt `0x83d42bec…` (success) + P1-2 off-scope skip +
+P1-3 un-enabled-call→400 + bad-HMAC→401 + idempotent→gated + kill-switch→no-mirror. Unit: reserve/commit/release
++ in-flight cap + nonce-lane + malformed-activity drop.
+
+**P1-4 / P2-5 (enable-submission) — proposal:** cleanest path is **approach (B)** — the App builds the
+owner-present, one-time `installModule(SmartSessions) + enableSessions(session)` op via the EXISTING, proven
+`/v1/userop/build` → owner signs on-device → `/v1/userop/submit` (Kernel-root validated, EIP-191 digest = the DCA
+path). Under (B) the copy record's `enableSignature` is **dead → remove it**, and P2-5's crypto-verify is moot (the
+enable is a standard userOp, not a stored sig). The alternative — approach (A), smart-session ENABLE-mode-on-
+first-use — is the deferred FF-b (blocked on the ERC-7739 enable-sig digest). Needs a Dev-2 call before changing
+the grant API. **Remaining P2 (fast-follow):** P2-1 confirm-then-record; P2-2 idempotency `(sourceTxHash,
+logIndex)`; P2-4 move test-only `__registerTestAdapter`/`__allowTestRouter` off the prod bundle.
+
+Status: C1 ✅ · C2 ✅ · C3 ✅ · C4 ✅ · C5 ✅ · **C6 ✅ (swap adapter + gated submit + webhook→receipt E2E)** · **KAN-156 P1s ✅**.
 Fast-follows: (a) QuoterV2 slippage floor → mainnet mirrors; (b) ERC-7739 enable-sig → ENABLE-mode-on-first-use;
 (c) real-liquidity testnet swap (funded account + pool).

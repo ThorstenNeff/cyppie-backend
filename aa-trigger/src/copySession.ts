@@ -183,6 +183,15 @@ const KEYCHAIN_SERVICE = "cyppie-copy-session";
 
 export class CopySessionRegistry {
   private records: Map<string, CopyRecord> = new Map();
+  // P1-1 (KAN-156): in-flight reservations per permissionId — submitted-but-not-yet-recorded mirrors. Counted
+  // toward the cap + idempotency set SYNCHRONOUSLY (atomic in Node's single-threaded loop, so concurrent Alchemy
+  // retries can't both pass the gate across the submit `await`). Cleared on commit (success) or release (failure).
+  private inflight: Map<string, { txs: Set<string>; spend: bigint }> = new Map();
+  // P1-1: per-follower nonce-lane counter. Each concurrent mirror gets a DISTINCT EntryPoint nonce key (uint192
+  // lane) so two ops for the same follower never collide on a single lane (on-chain getNonce lags pending ops, so
+  // serialization alone wouldn't prevent the collision). In-memory; lanes restart on reboot (each lane's on-chain
+  // sequence just continues independently).
+  private nonceCounters: Map<string, number> = new Map();
   constructor(private readonly path: string) {
     if (existsSync(path)) {
       const raw = JSON.parse(readFileSync(path, "utf8")) as CopyRecord[];
@@ -273,10 +282,55 @@ export class CopySessionRegistry {
     if (r.status !== "granted") throw new GateError(`session not granted (status=${r.status})`);
     if (r.paused) throw new GateError("session paused (kill-switch)");
     if ((r.mirroredTx ?? []).includes(sourceTxHash)) throw new GateError(`source ${sourceTxHash} already mirrored (idempotent)`);
-    const spent = BigInt(r.spentTotal ?? "0");
+    const inf = this.inflight.get(permissionId);
+    if (inf?.txs.has(sourceTxHash)) throw new GateError(`source ${sourceTxHash} already in-flight (idempotent)`);
+    const spent = BigInt(r.spentTotal ?? "0") + (inf?.spend ?? 0n);
     const cap = BigInt(r.scope.capTotalBudget);
     if (spent + spend > cap) throw new GateError(`exposure cap exceeded (${spent + spend} > ${cap})`);
     return r;
+  }
+
+  /**
+   * P1-1 (KAN-156): the ATOMIC gate+reserve. Runs `assertMirrorable` (which now also counts in-flight exposure +
+   * rejects an in-flight duplicate) and SYNCHRONOUSLY books the spend as in-flight — no `await` between check and
+   * book, so two concurrent webhook deliveries for the same (permissionId, sourceTxHash) or the same follower
+   * can't both pass before either records. Pair with `commitReservation` (success) or `releaseReservation`
+   * (failure). The on-chain SpendingLimits cap remains the hard bound; this keeps the off-chain Q7 + idempotency
+   * correct under concurrency.
+   */
+  reserve(permissionId: string, spend: bigint, sourceTxHash: string): CopyRecord {
+    const r = this.assertMirrorable(permissionId, spend, sourceTxHash);
+    const inf = this.inflight.get(permissionId) ?? { txs: new Set<string>(), spend: 0n };
+    inf.txs.add(sourceTxHash);
+    inf.spend += spend;
+    this.inflight.set(permissionId, inf);
+    return r;
+  }
+
+  private releaseInflight(permissionId: string, spend: bigint, sourceTxHash: string): void {
+    const inf = this.inflight.get(permissionId);
+    if (!inf) return;
+    if (inf.txs.delete(sourceTxHash)) inf.spend -= spend;
+    if (inf.txs.size === 0) this.inflight.delete(permissionId);
+  }
+
+  /** Commit a reservation after a SUCCESSFUL submit: persist Q7 + idempotency, drop the in-flight booking. */
+  commitReservation(permissionId: string, spend: bigint, sourceTxHash: string): CopyRecord {
+    this.releaseInflight(permissionId, spend, sourceTxHash);
+    return this.recordMirror(permissionId, spend, sourceTxHash);
+  }
+
+  /** Release a reservation after a FAILED submit: drop the in-flight booking, charge nothing (no double-count). */
+  releaseReservation(permissionId: string, spend: bigint, sourceTxHash: string): void {
+    this.releaseInflight(permissionId, spend, sourceTxHash);
+  }
+
+  /** P1-1: next distinct EntryPoint nonce-lane (uint16) for a follower — concurrent ops never share a lane. */
+  nextNonceKey(follower: string): number {
+    const k = follower.toLowerCase();
+    const n = this.nonceCounters.get(k) ?? 0;
+    this.nonceCounters.set(k, (n + 1) & 0xffff);
+    return n & 0xffff;
   }
 
   /** Record a submitted mirror (Q7 accounting + idempotency). Call AFTER a successful submit. */

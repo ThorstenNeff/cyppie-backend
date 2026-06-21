@@ -129,7 +129,11 @@ export class KeychainSessionKeySigner implements SessionKeySigner {
     const address = addressFromPrivateKey(priv);
     const keyHex = toHex(priv);
     try {
-      execFileSync("security", ["add-generic-password", "-s", service, "-a", account, "-w", keyHex, "-U"]);
+      // P1-5 (KAN-156): pass the key via STDIN, not argv. `security add-generic-password -w` with no inline value
+      // prompts twice ("password data" + "retype") and reads each from stdin — so the private key is never in the
+      // process table (`ps -axww`). Feed the key on both lines. The `-w <value>` inline form leaked it to any
+      // local process for the subprocess lifetime.
+      execFileSync("security", ["add-generic-password", "-s", service, "-a", account, "-U", "-w"], { input: `${keyHex}\n${keyHex}\n` });
     } finally {
       priv.fill(0);
     }

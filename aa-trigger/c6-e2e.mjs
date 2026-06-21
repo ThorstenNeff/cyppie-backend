@@ -133,6 +133,18 @@ ok(badSig.status === 401, `bad HMAC → 401 (got ${badSig.status})`);
 const r2 = await postWebhook([spend1]); // same sourceTxHash → idempotent (already mirrored)
 ok(r2.body.mirrors?.[0]?.status === "gated", `idempotent replay gated (status=${r2.body.mirrors?.[0]?.status})`);
 
+// P1-2 (KAN-156): a spend on a token NOT in the session scope (here USDC, scope.token=WETH) → skipped BEFORE any
+// submit (no sponsored gas-drain on a guaranteed-revert op). Router still DUMMY (allowlisted) + same source.
+const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const offScope = { category: "token", fromAddress: SOURCE, toAddress: DUMMY_ROUTER, hash: "0xc6offscope", rawContract: { address: USDC_BASE, rawValue: toHex(10n ** 17n) } };
+const rP12 = await postWebhook([offScope]);
+ok(rP12.body.mirrors?.[0]?.status === "skipped" && /scope/.test(rP12.body.mirrors?.[0]?.reason ?? ""), `P1-2: off-scope token skipped (no submit): ${rP12.body.mirrors?.[0]?.reason}`);
+
+// P1-3 (KAN-156): /v1/session/trigger rejects calls that target a NON-enabled (target,selector) — the session
+// key never signs arbitrary calls. A random target/selector → 400 (loopback BadRequest).
+const rP13 = await invoke("POST", "/v1/session/trigger", JSON.stringify({ permissionId, sourceTxHash: "0xc6trig", calls: [{ to: "0x000000000000000000000000000000000000dEaD", data: "0xdeadbeef" }] }), {});
+ok(rP13.status === 400 && /not in the session's enabled action set/.test(rP13.body?.error ?? ""), `P1-3: trigger rejects un-enabled call → 400 (${rP13.body?.error})`);
+
 await invoke("POST", "/v1/copy/session/pause", JSON.stringify({ permissionId }), {});
 const r3 = await postWebhook([{ ...spend1, hash: "0xc6source2" }]); // new source → but kill-switch on
 // Kill-switch: a paused session is excluded from the fan-out (findBySource skips paused) AND would be re-gated by
@@ -147,12 +159,15 @@ cleanup();
 console.log(fails === 0 ? "\nC6 E2E ALL PASS ✓" : `\n${fails} FAILED ✗`);
 process.exit(fails === 0 ? 0 : 1);
 
-// ── minimal in-process req/res shim for the real `handle` ──
+// ── minimal in-process req/res shim for the real `handle` (mirrors server.ts's createServer error mapping) ──
 function invoke(method, url, body, headers) {
   const req = makeReq(method, url, body, headers);
   return new Promise((resolve) => {
     const res = makeRes(resolve);
-    handle(req, res).catch((e) => { res.writeHead(500, {}); res.end(JSON.stringify({ error: String(e?.message ?? e) })); });
+    handle(req, res).catch((e) => {
+      const code = e?.constructor?.name === "GateError" ? 409 : e?.constructor?.name === "BadRequest" ? 400 : 500;
+      res.writeHead(code, {}); res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+    });
   });
 }
 function makeReq(method, url, body, headers) {

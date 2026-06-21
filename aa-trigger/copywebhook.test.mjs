@@ -45,6 +45,16 @@ ok(spends[0]?.chainId === 8453, "chainId from network slug");
 ok(spends[0]?.tokenIn.toLowerCase() === TOKEN.toLowerCase(), "tokenIn parsed");
 ok(parseFollowedSpends({ event: { network: "DOGE", activity: [] } }, isFollowed).length === 0, "unknown network → empty");
 
+console.log("P2-3 (KAN-156): one malformed activity is dropped, valid spends in the same batch survive");
+const mixed = { event: { network: "BASE_MAINNET", activity: [
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xbad", rawContract: { address: "0xNOT_AN_ADDRESS", rawValue: "0xf4240" } }, // getAddress throws → DROP, no 500
+  { category: "token", fromAddress: SOURCE, toAddress: ROUTER_BASE, hash: "0xgood", rawContract: { address: TOKEN, rawValue: "0xf4240" } }, // KEEP
+] } };
+let parsed;
+try { parsed = parseFollowedSpends(mixed, isFollowed); } catch { parsed = "THREW"; }
+ok(parsed !== "THREW", "malformed activity does not throw (no webhook 500 / retry storm)");
+ok(Array.isArray(parsed) && parsed.length === 1 && parsed[0].sourceTxHash === "0xgood", "the valid spend in the batch survives");
+
 console.log("C5: scaleMirror — proportional, cap-clamped");
 ok(scaleMirror(1000000n, 5000, 10n ** 18n) === 500000n, "50% allocation");
 ok(scaleMirror(1000000n, 10000, 400000n) === 400000n, "clamped to remaining cap");
