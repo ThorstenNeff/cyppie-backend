@@ -58,6 +58,19 @@ before signing — so a tampered op can't be blind-signed. (The 7702 `authorizat
 - The owner raw-secp256k1-signs `digestToSign` → 65-byte `r‖s‖v`; that IS the final `userOp.signature` (Kernel root
   adds no envelope — `wrapKernelSignature` is a passthrough). EIP-2 low-S applies (AaSigner already enforces).
 
+## Deterministic reference vector (`scripts/enable-userop-vector.mjs`) — pin against these
+Run `node scripts/enable-userop-vector.mjs` — it emits, for the canonical scope (same inputs as `copy-vector.mjs`),
+the real install+enableSessions `callData` (via permissionless `encodeCalls` = production bytes), the full v0.7
+PackedUserOperation fields, `userOpHash`, and `digestToSign`, with FIXED gas/nonce so the hash is reproducible.
+Dev-2's `verifyEnableUserOp` recompute must hit these byte-exact; at runtime it feeds the ACTUAL `/v1/userop/build`
+fields through the same packing/hashing. Canonical results (EntryPoint `0x0000000071727De22E5E9d8BAf0edAc6f37da032`,
+`sender=0xf39F…2266`, `nonce=0`, no factory, `permissionId=0x1c3f76fac3f146c12a665114ff61d6d257653434d854ecb3570c6b2c32e96b55`):
+- **callData** starts `0xe9ae5c53…` (Kernel `execute` batch of the two calls) — full bytes in the script output.
+- **accountGasLimits** `0x…0016e360…000927c0` (verif 1_500_000 ‖ call 600_000); **gasFees** `0x…3b9aca00…3b9aca00`
+  (1 gwei ‖ 1 gwei); **paymasterAndData** `0x0000000000000039cd5e8aE05257CE51C473ddd1 ‖ 00061a80 ‖ 000186a0` (fixed placeholder pm).
+- **ETH(1):** `userOpHash 0xc4d1510e7efadce1ca010db75fe501d2ae685f14b8c27c4fe364ed1d0170dfe9` · `digestToSign 0xe7d07e62aba236625113c51e2c9b24b7cda6ff8d23157f3ae9f9d793e1e4e118`
+- **Base(8453):** `userOpHash 0x7fa6707b20e07e1ed55c1fa9f4eb5893efb46497b8f007c198b28ea6a928c194` · `digestToSign 0x1af0767764637fc2ba38cae9b0a72a85951ac1d1a952ead6dd58f23e2105c415`
+
 ## Backend guarantees / asks
 - `/v1/userop/build` builds + sponsors + returns the stable hash for ARBITRARY `calls` — no copy-specific endpoint
   needed. The App constructs the two calls (§b); the backend does not interpret them.
