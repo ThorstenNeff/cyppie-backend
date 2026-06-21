@@ -125,7 +125,15 @@ Fail-closed (ADR-0024 harm-reduction): dynamic with no derivable output leg ⇒ 
 buy); and **never submit without a reliable `minOut`** — `minOutFor` fail-closes mainnet until the QuoterV2
 slippage floor (KAN-151), so mainnet dynamic is gated; testnet (no MEV) allows a 0 floor for the proof. The cap +
 router binding still bound the €-amount. Mirror response carries `mode` ("fixed"|"dynamic") + the resolved
-`tokenOut`. No enable/permissionId change (mirror-time only). *Optional fast-follow: per-chain tokenOut allowlist.*
+`tokenOut`. No enable/permissionId change (mirror-time only).
+
+**Dynamic `tokenOut` allowlist (curated guardrail, KAN-161):** in DYNAMIC mode the webhook mirrors ONLY when the
+derived `tokenOut` is on the chain's **curated** `TOKENOUT_ALLOWLIST` (`copyWebhook.ts`, single source, addresses
+verified on-chain) — off-list ⇒ fail-closed skip (bounds rug/honeypot/illiquid exposure). FIXED mode is exempt
+(the user pre-committed to a trusted token). Curated initial set (deep-V3-pool, via the allowlisted UniversalRouter):
+- **ETH(1):** WETH, USDC, USDT, DAI, WBTC.
+- **Base(8453):** WETH, USDC, DAI, cbBTC, cbETH.
+Extend in one place (`TOKENOUT_ALLOWLIST`).
 
 Proof (Base Sepolia): `c8-dynamic-e2e.mjs` — 2-leg swap webhook → derived tokenOut (USDC `0x8335…2913`) →
 dynamic-mode mirror receipt `0x0a19d0c7…`; fixed mode unchanged (`c6-e2e.mjs` green). Unit: output-leg derive

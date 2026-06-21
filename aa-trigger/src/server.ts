@@ -6,7 +6,7 @@ import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type 
 import { getRemoveSessionAction } from "@rhinestone/module-sdk";
 import { defaultRegistry, GateError, sessionFromRecord, type CopyScope, type CopyRecord } from "./copySession.js";
 import { submitMirror, waitMirrorOutcome } from "./mirror.js";
-import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey } from "./copyWebhook.js";
+import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey, isAllowlistedTokenOut } from "./copyWebhook.js";
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
 
 const copyRegistry = defaultRegistry();
@@ -292,6 +292,9 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
           if (!tokenOut) { mirrors.push({ ...base, status: "skipped", reason: "dynamic: no output leg detected (can't derive tokenOut)" }); continue; }
           const feeTier = r.scope.feeTier ?? DYNAMIC_DEFAULT_FEE_TIER; // dynamic: default pool fee (QuoterV2 resolves the real pool in KAN-151)
           base.mode = dynamic ? "dynamic" : "fixed"; base.tokenOut = tokenOut;
+          // KAN-161 guardrail: in DYNAMIC mode only mirror into a CURATED tokenOut (deep-pool, vetted) — off-allowlist
+          // ⇒ fail-closed skip (bounds rug/honeypot exposure). FIXED mode = user pre-committed → no allowlist check.
+          if (dynamic && !isAllowlistedTokenOut(s.chainId, tokenOut)) { mirrors.push({ ...base, status: "skipped", reason: "dynamic: tokenOut not on the curated allowlist" }); continue; }
           // Guardrail (ADR-0024 harm-reduction): never submit without a reliable slippage floor — matters MORE in
           // dynamic mode (the bought token is the trader's choice, not pre-vetted). minOutFor fail-closes mainnet
           // until the QuoterV2 floor (KAN-151); testnet (no MEV) allows a 0 floor for the proof.

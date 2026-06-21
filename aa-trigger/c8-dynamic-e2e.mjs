@@ -80,8 +80,9 @@ reg.grant(permissionId);
 // test router/adapter (no-liquidity-safe approve(0)).
 const { handle } = await import("./dist/server.js");
 const { __registerTestAdapter, APPROVE_SELECTOR } = await import("./dist/swapAdapter.js");
-const { __allowTestRouter } = await import("./dist/copyWebhook.js");
+const { __allowTestRouter, __allowTestTokenOut } = await import("./dist/copyWebhook.js");
 __allowTestRouter(84532, DUMMY_ROUTER);
+__allowTestTokenOut(84532, TOKEN_OUT); // KAN-161: USDC on the (testnet) dynamic tokenOut-allowlist for this proof
 __registerTestAdapter(DUMMY_ROUTER, {
   buildMirrorCalls: () => [{ to: WETH, value: 0n, data: encodeFunctionData({ abi: parseAbi(["function approve(address,uint256)"]), args: ["0x000000000000000000000000000000000000dEaD", 0n] }) }],
   requiredActions: ({ token, router }) => [
@@ -90,25 +91,35 @@ __registerTestAdapter(DUMMY_ROUTER, {
   ],
 });
 
-// webhook: a 2-leg swap (source spends WETH → DUMMY, source receives USDC ← POOL), same tx hash.
+// webhook helper: 2-leg swap (source spends WETH → DUMMY, source receives `tokenOut` ← POOL), same tx hash.
 const bundler = createBundlerClient({ chain: baseSepolia, transport: http(bundlerUrl) });
-const body = JSON.stringify({ event: { network: "BASE_SEPOLIA", activity: [
-  { category: "token", fromAddress: SOURCE, toAddress: DUMMY_ROUTER, hash: "0xc8dyn", rawContract: { address: WETH, rawValue: toHex(10n ** 17n) } },
-  { category: "token", fromAddress: POOL, toAddress: SOURCE, hash: "0xc8dyn", rawContract: { address: TOKEN_OUT, rawValue: toHex(250000000n) } },
-] } });
-const sigHex = createHmac("sha256", WEBHOOK_KEY).update(body, "utf8").digest("hex");
-console.log("\n[webhook] 2-leg swap → DYNAMIC derive + mirror…");
-const res = await new Promise((resolve) => {
-  const out = []; let code = 200;
-  handle({ method: "POST", url: "/v1/copy/webhook", headers: { "x-alchemy-signature": sigHex }, [Symbol.asyncIterator]: async function* () { yield Buffer.from(body, "utf8"); } },
-    { writeHead(c) { code = c; }, end(s) { if (s) out.push(s); resolve({ status: code, body: JSON.parse(out.join("")) }); } }).catch((e) => resolve({ status: 500, body: { error: String(e?.message ?? e) } }));
-});
+const postSwap = async (tokenOut, hash) => {
+  const body = JSON.stringify({ event: { network: "BASE_SEPOLIA", activity: [
+    { category: "token", fromAddress: SOURCE, toAddress: DUMMY_ROUTER, hash, rawContract: { address: WETH, rawValue: toHex(10n ** 17n) } },
+    { category: "token", fromAddress: POOL, toAddress: SOURCE, hash, rawContract: { address: tokenOut, rawValue: toHex(250000000n) } },
+  ] } });
+  const sigHex = createHmac("sha256", WEBHOOK_KEY).update(body, "utf8").digest("hex");
+  return new Promise((resolve) => {
+    const out = []; let code = 200;
+    handle({ method: "POST", url: "/v1/copy/webhook", headers: { "x-alchemy-signature": sigHex }, [Symbol.asyncIterator]: async function* () { yield Buffer.from(body, "utf8"); } },
+      { writeHead(c) { code = c; }, end(s) { if (s) out.push(s); resolve({ status: code, body: JSON.parse(out.join("")) }); } }).catch((e) => resolve({ status: 500, body: { error: String(e?.message ?? e) } }));
+  });
+};
+console.log("\n[webhook] 2-leg swap → DYNAMIC derive + mirror (on-allowlist tokenOut)…");
+const res = await postSwap(TOKEN_OUT, "0xc8dyn");
 ok(res.status === 200 && res.body.detected === 1, `webhook 200 + detected 1 (got ${res.status}/${res.body.detected})`);
 const m = res.body.mirrors?.[0];
 ok(m?.mode === "dynamic", `mirror mode = dynamic (got ${m?.mode})`);
 ok(m?.tokenOut?.toLowerCase() === TOKEN_OUT.toLowerCase(), `tokenOut DERIVED from output leg = USDC (got ${m?.tokenOut})`);
 ok(m?.status === "submitted" && !!m?.userOpHash, `dynamic mirror submitted (status=${m?.status})`);
 if (m?.userOpHash) { const mr = await bundler.waitForUserOperationReceipt({ hash: m.userOpHash }); ok(mr.success, `DYNAMIC MIRROR RECEIPT ${mr.receipt.transactionHash} success=${mr.success}`); }
+
+// KAN-161 guardrail: an OFF-allowlist derived tokenOut → fail-closed skip (no mirror, no sponsored op).
+console.log("\n[webhook] off-allowlist tokenOut → fail-closed skip…");
+const offTok = "0x111122223333444455556666777788889999AaAa"; // not on the (test) tokenOut-allowlist
+const off = await postSwap(offTok, "0xc8off");
+const mo = off.body.mirrors?.[0];
+ok(mo?.status === "skipped" && /allowlist/.test(mo?.reason ?? ""), `off-allowlist dynamic tokenOut skipped (status=${mo?.status}, reason=${mo?.reason})`);
 
 console.log("\n================ KAN-161 DYNAMIC mirror ================");
 console.log("enable tx        :", eR.receipt.transactionHash);

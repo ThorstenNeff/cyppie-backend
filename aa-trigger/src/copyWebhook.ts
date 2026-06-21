@@ -22,6 +22,34 @@ export function isAllowlistedRouter(chainId: number, router: string): boolean {
 }
 
 /**
+ * KAN-161 dynamic-mode `tokenOut` allowlist — the CURATED (not permissionless) set of established, deep-V3-pool
+ * tokens the dynamic copy may buy, per chain. In DYNAMIC mode the webhook mirrors ONLY when the derived
+ * `tokenOutDetected` is on the chain's list; off-list ⇒ fail-closed skip (bounds rug/honeypot/illiquid exposure,
+ * ADR-0024). Does NOT apply to FIXED mode (the user pre-committed to a trusted token). Addresses verified
+ * on-chain via symbol(); extend HERE (single source). Initial set is PO-reviewed.
+ */
+export const TOKENOUT_ALLOWLIST: Record<number, Set<string>> = {
+  1: new Set([
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // WETH
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
+    "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", // WBTC
+  ]),
+  8453: new Set([
+    "0x4200000000000000000000000000000000000006", // WETH
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", // USDC
+    "0x50c5725949a6f0c72e6c4a641f24049a917db0cb", // DAI
+    "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf", // cbBTC
+    "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22", // cbETH
+  ]),
+};
+
+export function isAllowlistedTokenOut(chainId: number, token: string): boolean {
+  return TOKENOUT_ALLOWLIST[chainId]?.has(token.toLowerCase()) ?? false;
+}
+
+/**
  * TEST-ONLY: allowlist an extra router for an E2E (e.g. a no-code test router so the full pipeline can land a
  * receipt without DEX liquidity). Production routers live in the static ROUTER_ALLOWLIST above.
  *
@@ -31,6 +59,12 @@ export function isAllowlistedRouter(chainId: number, router: string): boolean {
 export function __allowTestRouter(chainId: number, router: string): void {
   if (process.env.COPY_TEST_HOOKS !== "1") throw new Error("__allowTestRouter is test-only (set COPY_TEST_HOOKS=1)");
   (ROUTER_ALLOWLIST[chainId] ??= new Set()).add(router.toLowerCase());
+}
+
+/** TEST-ONLY (KAN-161): allowlist a tokenOut for an E2E (e.g. a testnet chain). Throws unless COPY_TEST_HOOKS=1. */
+export function __allowTestTokenOut(chainId: number, token: string): void {
+  if (process.env.COPY_TEST_HOOKS !== "1") throw new Error("__allowTestTokenOut is test-only (set COPY_TEST_HOOKS=1)");
+  (TOKENOUT_ALLOWLIST[chainId] ??= new Set()).add(token.toLowerCase());
 }
 
 /**
