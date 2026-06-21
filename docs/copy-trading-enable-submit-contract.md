@@ -105,6 +105,21 @@ fields through the same packing/hashing. Canonical results (EntryPoint `0x000000
 - **ETH(1):** `userOpHash 0xc4d1510e7efadce1ca010db75fe501d2ae685f14b8c27c4fe364ed1d0170dfe9` · `digestToSign 0xe7d07e62aba236625113c51e2c9b24b7cda6ff8d23157f3ae9f9d793e1e4e118`
 - **Base(8453):** `userOpHash 0x7fa6707b20e07e1ed55c1fa9f4eb5893efb46497b8f007c198b28ea6a928c194` · `digestToSign 0x1af0767764637fc2ba38cae9b0a72a85951ac1d1a952ead6dd58f23e2105c415`
 
+## KAN-159 — DCA enable reuses this contract 1:1 (only the session config differs)
+`/v1/userop/build` is **generic + keyless**: it takes `{ chainId, owner, calls }`, wraps them in a sponsored
+userOp (gas/nonce) over a WATCH-ONLY owner, and returns the digest — it never signs, never interprets the calls.
+So the DCA enable is the SAME `installModule(SmartSessions) + enableSessions(session)` batch, the SAME v0.7
+userOpHash packing, the SAME `digestToSign = hashMessage(userOpHash)`, and the SAME `verifyEnableUserOp` /
+`verify7702Authorization` primitives — **only the `enableSessions(session)` payload carries the DCA session**
+(the C3-corrected **2-action, NO Permit2** shape: `userOpPolicies=[TimeFrame]`; actions =
+`USDC.approve→[SpendingLimits cap]` + `router.swap(0x5ae401dc)→[TimeFrame]`). No DCA-specific endpoint.
+
+Deterministic DCA vector: `scripts/dca-enable-userop-vector.mjs` (userOp layer on Vektor-D; permissionId
+sanity-gated to `0x82bc397553fc6577974c762cd42958d860cd838a55f55f245ee5f6debab698b0`). Canonical results
+(EntryPoint `0x…032`, sender `0xf39F…2266`, nonce 0, salt `0x…01`):
+- **ETH(1):** `userOpHash 0x529780aaff1571978ced7d40ae452a9d783de53256e268b1de07c0997901196f` · `digestToSign 0x330e89d7783c976f5e268d0742748edb77605bfb1f5e98068a8bc7019743849c`
+- **Base(8453):** `userOpHash 0xabd656edf35ecf40b17bf0d897850a8ddfc731458228c57c815479b9d52bfb47` · `digestToSign 0x652b01534648559aab7484db249ce869095f167e495ee78291e3b1a17fba51b5`
+
 ## Backend guarantees / asks
 - `/v1/userop/build` builds + sponsors + returns the stable hash for ARBITRARY `calls` — no copy-specific endpoint
   needed. The App constructs the two calls (§b); the backend does not interpret them.
