@@ -3,6 +3,7 @@ import { decodeFunctionData, parseAbi, type Address, type Hex } from "viem";
 import { PORT, HOST } from "./config.js";
 import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, type SupportedChainId } from "./addresses.js";
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
+import { getRemoveSessionAction } from "@rhinestone/module-sdk";
 import { defaultRegistry, GateError, sessionFromRecord, type CopyScope, type CopyRecord } from "./copySession.js";
 import { submitMirror, waitMirrorOutcome } from "./mirror.js";
 import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey } from "./copyWebhook.js";
@@ -167,13 +168,49 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     return send(res, 200, { permissionId: r.permissionId, status: r.status });
   }
 
-  // Kill-switch (C4): pause/resume a session's mirrors + mark on-chain-revoked.
-  if (method === "POST" && (url === "/v1/copy/session/pause" || url === "/v1/copy/session/resume" || url === "/v1/copy/session/revoke")) {
+  // Kill-switch (C4): pause/resume a session's mirrors (off-chain, instant). The PERMANENT revoke is on-chain
+  // (removeSession) — see /v1/copy/session/revoke/build + /submit below.
+  if (method === "POST" && (url === "/v1/copy/session/pause" || url === "/v1/copy/session/resume")) {
     const b = await readJson(req);
     if (!b.permissionId) throw new BadRequest("missing permissionId");
-    const id = b.permissionId as string;
-    const r = url.endsWith("revoke") ? copyRegistry.revoke(id) : copyRegistry.setPaused(id, url.endsWith("pause"));
+    const r = copyRegistry.setPaused(b.permissionId as string, url.endsWith("pause"));
     return send(res, 200, { permissionId: r.permissionId, status: r.status, paused: !!r.paused });
+  }
+
+  // KAN-157 Active-list: the granted (active/paused) copy sessions for a follower (UX Copy0-Active rows).
+  //   GET /v1/copy/sessions?follower=0x…
+  if (method === "GET" && url.startsWith("/v1/copy/sessions")) {
+    const u = new URL(url, "http://localhost");
+    const follower = u.searchParams.get("follower");
+    if (!follower) throw new BadRequest("missing follower");
+    return send(res, 200, { follower, sessions: copyRegistry.viewByFollower(follower) });
+  }
+
+  // KAN-157 on-chain REVOKE (non-custodial, owner-signed on-device per ADR-0009) — phase 1: build the sponsored
+  // SmartSessions.removeSession(permissionId) userOp + return the digest the owner signs. Reuses buildUserOp.
+  if (method === "POST" && url === "/v1/copy/session/revoke/build") {
+    const b = await readJson(req);
+    if (!b.permissionId) throw new BadRequest("missing permissionId");
+    const rec = copyRegistry.get(b.permissionId as string);
+    if (!rec) throw new GateError(`unknown permissionId ${String(b.permissionId)}`);
+    const chainId = requireChain(rec.scope.chainId);
+    const remove = getRemoveSessionAction({ permissionId: rec.permissionId });
+    const calls: Call[] = [{ to: remove.to as Address, value: 0n, data: remove.callData as Hex }];
+    const built = await buildUserOp(chainCtxFor(chainId), rec.scope.follower as Address, calls);
+    return send(res, 200, { permissionId: rec.permissionId, ...built });
+  }
+
+  // KAN-157 on-chain REVOKE — phase 2: submit the owner-signed removeSession op; on success mark the session
+  // revoked (no further mirror — the on-chain session is gone, the off-chain gate also rejects). Reuses submitUserOp.
+  if (method === "POST" && url === "/v1/copy/session/revoke/submit") {
+    const b = await readJson(req);
+    if (!b.permissionId || !b.userOp || !b.signature) throw new BadRequest("missing permissionId, userOp or signature");
+    const rec = copyRegistry.get(b.permissionId as string);
+    if (!rec) throw new GateError(`unknown permissionId ${String(b.permissionId)}`);
+    const chainId = requireChain(rec.scope.chainId);
+    const result = await submitUserOp(chainCtxFor(chainId), b.userOp as SerializedUserOp, b.signature as Hex, b.authorization as SignedAuthorization | undefined);
+    const r = copyRegistry.revoke(rec.permissionId); // off-chain mark too — defense-in-depth on top of the on-chain removeSession
+    return send(res, 200, { permissionId: r.permissionId, status: r.status, userOpHash: result.userOpHash });
   }
 
   // Copy-Trading mirror trigger (C4, loopback-only): the calls are VALIDATED against the session's enabled

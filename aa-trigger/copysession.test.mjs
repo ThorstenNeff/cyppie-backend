@@ -134,6 +134,36 @@ console.log("P1-1 (KAN-156): atomic reserve/commit/release + distinct nonce lane
   rmSync(rpath, { force: true });
 }
 
+console.log("KAN-157: viewByFollower — active-list rows (source/cap/used/remaining/status/since)");
+{
+  const rpath = path + ".k157";
+  rmSync(rpath, { force: true });
+  const r = new CopySessionRegistry(rpath);
+  const F = "0xfollower00000000000000000000000000000abc";
+  const OTHER = "0xother000000000000000000000000000000000ab";
+  const mk = (pid, follower, status, opts = {}) => r.upsert({
+    permissionId: pid, sessionPublicKey: "0x0000000000000000000000000000000000000001", keychainAccount: "x",
+    scope: { chainId: 84532, token: "0x4200000000000000000000000000000000000006", capTotalBudget: "1000",
+      router: "0x000000000000000000000000000000000000c0de", selector: "0x3593564c", windowStart: 0, windowEnd: 1893456000, follower, source: "0x1111111111111111111111111111111111111111" },
+    salt: "0x" + "00".repeat(32), status, grantedAt: 1718000000, ...opts,
+  });
+  mk("0x" + "a1".repeat(32), F, "granted", { spentTotal: "300" });            // active, used 300
+  mk("0x" + "a2".repeat(32), F, "granted", { paused: true, spentTotal: "1000" }); // paused, cap exhausted
+  mk("0x" + "a3".repeat(32), F, "prepared");                                   // not yet enabled → excluded
+  mk("0x" + "a4".repeat(32), F, "revoked");                                    // ended → excluded
+  mk("0x" + "b1".repeat(32), OTHER, "granted");                               // other follower → excluded
+  const v = r.viewByFollower(F);
+  ok(v.length === 2, `only granted (active+paused) for the follower (got ${v.length})`);
+  const active = v.find((x) => x.status === "active");
+  ok(active && active.used === "300" && active.remaining === "700", "used/remaining computed (cap 1000 − used 300 = 700)");
+  ok(active.source.toLowerCase() === "0x1111111111111111111111111111111111111111", "source surfaced");
+  ok(active.since === 1718000000, "since = grantedAt");
+  const paused = v.find((x) => x.status === "paused");
+  ok(paused && paused.remaining === "0", "exhausted cap → remaining clamped to 0");
+  ok(r.viewByFollower(OTHER).length === 1 && r.viewByFollower("0xnobody0000000000000000000000000000000000").length === 0, "scoped per follower");
+  rmSync(rpath, { force: true });
+}
+
 console.log("C3: USE-mode DIGEST-LOCK — session signs the RAW userOpHash (proven on Base Sepolia)");
 {
   const PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";

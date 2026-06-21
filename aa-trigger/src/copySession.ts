@@ -169,6 +169,8 @@ export interface CopyRecord {
   scope: { chainId: number; token: Address; capTotalBudget: string; router: Address; selector: Hex; windowStart: number; windowEnd: number; follower: Address; source: Address; tokenOut?: Address; feeTier?: number; slippageBps?: number };
   salt: Hex;
   status: CopyStatus;
+  createdAt?: number; // unix s when the session was provisioned (prepare) — "following since" fallback
+  grantedAt?: number; // unix s when the session was granted (enable landed) — the "following since" (KAN-157 list)
   // ── SubmitGate state (C4) ──
   paused?: boolean; // kill-switch: mirrors rejected while true (separate from on-chain revoke)
   spentTotal?: string; // Q7 backend accounting: cumulative mirrored spend (defense-in-depth on the on-chain cap)
@@ -177,6 +179,24 @@ export interface CopyRecord {
 
 /** A SubmitGate rejection (kill-switch / exposure cap / idempotency / not-granted) → HTTP 409/400, never a 500. */
 export class GateError extends Error {}
+
+/**
+ * The per-session view for the KAN-157 Active-list (the UX `Copy0-Active` row fields, SPEC_COPY_session.md):
+ * followed `source` trader, the cumulative budget `cap`, `used`/`remaining`, `status` (active/paused), and `since`.
+ * All amounts are decimal strings (denominated in the spend `token`). Final response shape pins with Dev-1.
+ */
+export interface CopySessionView {
+  permissionId: Hex;
+  chainId: number;
+  source: Address;       // the followed trader (advisory in the UX — not a guarantee)
+  token: Address;        // the spend-budget token (cap/used/remaining denomination)
+  cap: string;           // capTotalBudget (cumulative N3)
+  used: string;          // spentTotal
+  remaining: string;     // cap − used (never negative)
+  status: "active" | "paused"; // granted+unpaused vs granted+paused (kill-switch)
+  since: number;         // unix s — "following since" (grantedAt, or createdAt fallback)
+  router: Address;
+}
 
 const KEYCHAIN_SERVICE = "cyppie-copy-session";
 
@@ -209,6 +229,26 @@ export class CopySessionRegistry {
   list(): CopyRecord[] {
     return [...this.records.values()];
   }
+  /**
+   * KAN-157 Active-list: the granted (active or paused) sessions for a follower, as UX view rows. Excludes
+   * `prepared` (not yet enabled) and `revoked` (ended). `used`/`remaining` from the off-chain Q7 accounting.
+   */
+  viewByFollower(follower: string): CopySessionView[] {
+    const f = follower.toLowerCase();
+    return [...this.records.values()]
+      .filter((r) => r.status === "granted" && r.scope.follower.toLowerCase() === f)
+      .map((r) => {
+        const cap = BigInt(r.scope.capTotalBudget);
+        const used = BigInt(r.spentTotal ?? "0");
+        const remaining = used >= cap ? 0n : cap - used;
+        return {
+          permissionId: r.permissionId, chainId: r.scope.chainId, source: r.scope.source, token: r.scope.token,
+          cap: cap.toString(), used: used.toString(), remaining: remaining.toString(),
+          status: r.paused ? "paused" : "active", since: r.grantedAt ?? r.createdAt ?? 0, router: r.scope.router,
+        } as CopySessionView;
+      });
+  }
+
   /** Granted (active) sessions following a given source trader on a chain (C5 webhook fan-out). */
   findBySource(source: string, chainId: number): CopyRecord[] {
     const s = source.toLowerCase();
@@ -230,6 +270,7 @@ export class CopySessionRegistry {
     this.upsert({
       permissionId: inputs.permissionId, sessionPublicKey: address, keychainAccount,
       scope: { ...scope, capTotalBudget: scope.capTotalBudget.toString() }, salt, status: "prepared",
+      createdAt: Math.floor(Date.now() / 1000),
     });
     return inputs;
   }
@@ -247,7 +288,7 @@ export class CopySessionRegistry {
     const r = this.records.get(permissionId);
     if (!r) throw new Error(`unknown permissionId ${permissionId}`);
     if (r.status === "revoked") throw new Error("session revoked");
-    const updated: CopyRecord = { ...r, status: "granted" };
+    const updated: CopyRecord = { ...r, status: "granted", grantedAt: r.grantedAt ?? Math.floor(Date.now() / 1000) };
     this.upsert(updated);
     return updated;
   }
