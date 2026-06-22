@@ -26,6 +26,10 @@ console.log("KAN-164(B): deriveSellCaps — formula cap_i = ceil(budget × w_i �
   ok(capOf(caps, WBTC) === "20000", `WBTC cap 20000 (got ${capOf(caps, WBTC)})`);
   // budget token cap = budget × turnover = 20000 (the source — full budget can rotate out)
   ok(capOf(caps, USDC) === "20000", `USDC (budget) cap = budget×turnover = 20000 (got ${capOf(caps, USDC)})`);
+  // ≈value disclosure (FR-9): basket value = budget×weight×turnover/10000 = 10000; budget token value = budget×turnover.
+  const valOf = (t) => caps.find((c) => c.token.toLowerCase() === t.toLowerCase())?.valueSnapshotBaseUnits;
+  ok(valOf(WETH) === "10000" && valOf(WBTC) === "10000", `basket ≈value = 10000 (WETH ${valOf(WETH)}, WBTC ${valOf(WBTC)})`);
+  ok(valOf(USDC) === "20000", `budget-token ≈value = budget×turnover = 20000 (got ${valOf(USDC)})`);
   // canonical address order: WBTC(0x2260) < USDC(0xA0b8) < WETH(0xC02a)
   ok(caps.map((c) => c.token.toLowerCase()).join() === [WBTC, USDC, WETH].map((a) => a.toLowerCase()).join(), "canonical address order");
 }

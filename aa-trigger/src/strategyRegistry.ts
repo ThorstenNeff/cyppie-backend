@@ -2,6 +2,9 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from "
 import { dirname, join } from "node:path";
 import type { Address, Hex } from "viem";
 import type { SellCap } from "./strategyCaps.js";
+import { KeychainSessionKeySigner } from "./sessionKeySigner.js";
+
+export const STRATEGY_KEYCHAIN_SERVICE = "cyppie-strategy-session";
 
 /**
  * Vaults-B strategy session registry (KAN-164) — the metadata store the rebalance engine + the active-list read,
@@ -103,6 +106,13 @@ export class StrategySessionRegistry {
     const updated: StrategyRecord = { ...r, status: "revoked" };
     this.upsert(updated);
     return updated;
+  }
+
+  /** The backend session-key signer for a recorded session (resolves the Keychain key by the stored account). */
+  signerFor(permissionId: string): KeychainSessionKeySigner {
+    const r = this.records.get(permissionId);
+    if (!r) throw new Error(`unknown permissionId ${permissionId}`);
+    return new KeychainSessionKeySigner(STRATEGY_KEYCHAIN_SERVICE, r.keychainAccount, r.sessionPublicKey);
   }
 
   /** Granted (active/paused) strategy sessions for an account → active-list view rows. Excludes prepared/revoked. */

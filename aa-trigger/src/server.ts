@@ -10,6 +10,7 @@ import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey, isA
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
 import { buildDcaBuy, submitDcaBuy } from "./dcaBuild.js";
 import { defaultStrategyRegistry } from "./strategyRegistry.js";
+import { prepareStrategySession } from "./strategyService.js";
 
 const copyRegistry = defaultRegistry();
 const strategyRegistry = defaultStrategyRegistry();
@@ -258,6 +259,63 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       else strategyRegistry.revoke(v.permissionId); // self-heal: on-chain gone → revoked, excluded
     }
     return send(res, 200, { account, sessions: sLive });
+  }
+
+  // KAN-164 Vaults-B prepare: the ENGINE owns the cap derivation (single source). Provision a scoped backend
+  // session key → one-time QuoterV2 snapshot → deriveSellCaps → buildStrategySession → record `prepared` →
+  // return the StrategyPrepare (permissionId + caps[{token,capBaseUnits,valueSnapshotBaseUnits}] + sessionPublicKey
+  // + salt) the app verifies + builds the enable from. Auth ≠ Custody: the key is Keychain-held.
+  if (method === "POST" && url === "/v1/strategy/session/prepare") {
+    const b = await readJson(req);
+    const chainId = requireChain(b.chainId);
+    for (const f of ["follower", "budgetToken", "budget", "basket", "windowStart", "windowEnd", "router", "feeTier"]) {
+      if (b[f] === undefined) throw new BadRequest(`missing ${f}`);
+    }
+    const prepare = await prepareStrategySession(strategyRegistry, {
+      chainId: chainId as 1 | 8453 | 84532, follower: b.follower as Address, budgetToken: b.budgetToken as Address,
+      budget: BigInt(b.budget as string), basket: (b.basket as { token: Address; weightBps: number }[]).map((x) => ({ token: x.token, weightBps: Number(x.weightBps) })),
+      windowStart: Number(b.windowStart), windowEnd: Number(b.windowEnd), router: b.router as Address,
+      feeTier: Number(b.feeTier), turnover: b.turnover !== undefined ? Number(b.turnover) : undefined,
+    });
+    return send(res, 200, prepare);
+  }
+  // Mark a prepared strategy session active once the owner broadcast the on-chain enable (approach B, like copy).
+  if (method === "POST" && url === "/v1/strategy/session/grant") {
+    const b = await readJson(req);
+    if (!b.permissionId) throw new BadRequest("missing permissionId");
+    const r = strategyRegistry.grant(b.permissionId as string);
+    return send(res, 200, { permissionId: r.permissionId, status: r.status });
+  }
+  // Kill-switch: pause/resume a strategy's rebalances (off-chain, instant). Permanent revoke is on-chain below.
+  if (method === "POST" && (url === "/v1/strategy/session/pause" || url === "/v1/strategy/session/resume")) {
+    const b = await readJson(req);
+    if (!b.permissionId) throw new BadRequest("missing permissionId");
+    const r = strategyRegistry.setPaused(b.permissionId as string, url.endsWith("pause"));
+    return send(res, 200, { permissionId: r.permissionId, status: r.status, paused: !!r.paused });
+  }
+  // On-chain REVOKE (owner-signed removeSession) — phase 1: build the sponsored op + return the digest. Reuses
+  // the copy revoke pattern (getRemoveSessionAction + buildUserOp).
+  if (method === "POST" && url === "/v1/strategy/session/revoke/build") {
+    const b = await readJson(req);
+    if (!b.permissionId) throw new BadRequest("missing permissionId");
+    const rec = strategyRegistry.get(b.permissionId as string);
+    if (!rec) throw new GateError(`unknown permissionId ${String(b.permissionId)}`);
+    const chainId = requireChain(rec.chainId);
+    const remove = getRemoveSessionAction({ permissionId: rec.permissionId });
+    const calls: Call[] = [{ to: remove.to as Address, value: 0n, data: remove.callData as Hex }];
+    const built = await buildUserOp(chainCtxFor(chainId), rec.account as Address, calls);
+    return send(res, 200, { permissionId: rec.permissionId, ...built });
+  }
+  // On-chain REVOKE — phase 2: submit the owner-signed removeSession; on success mark revoked (no further rebalance).
+  if (method === "POST" && url === "/v1/strategy/session/revoke/submit") {
+    const b = await readJson(req);
+    if (!b.permissionId || !b.userOp || !b.signature) throw new BadRequest("missing permissionId, userOp or signature");
+    const rec = strategyRegistry.get(b.permissionId as string);
+    if (!rec) throw new GateError(`unknown permissionId ${String(b.permissionId)}`);
+    const chainId = requireChain(rec.chainId);
+    const result = await submitUserOp(chainCtxFor(chainId), b.userOp as SerializedUserOp, b.signature as Hex, b.authorization as SignedAuthorization | undefined);
+    const r = strategyRegistry.revoke(rec.permissionId);
+    return send(res, 200, { permissionId: r.permissionId, status: r.status, userOpHash: result.userOpHash });
   }
 
   // KAN-157 on-chain REVOKE (non-custodial, owner-signed on-device per ADR-0009) — phase 1: build the sponsored

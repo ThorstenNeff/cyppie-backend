@@ -35,10 +35,16 @@ export interface StrategyIntent {
   basket: { token: Address; weightBps: number }[]; // target allocation; SHOULD sum to 10_000
 }
 
-/** A derived per-token Sell-Cap (FR-6 wire shape: capBaseUnits is a base-unit decimal string). */
+/**
+ * A derived per-token Sell-Cap (FR-6 wire shape: base-unit decimal strings).
+ *  - `capBaseUnits` — the security-relevant on-chain cap (token_i base units), pinned into the enable.
+ *  - `valueSnapshotBaseUnits` — additive disclosure legibility (FR-9 ≈): the ≈value this cap represents in the
+ *    BUDGET TOKEN's base units at the prepare snapshot, so the UI can render "≈ value" + the envelope. Advisory.
+ */
 export interface SellCap {
   token: Address;
   capBaseUnits: string;
+  valueSnapshotBaseUnits: string;
 }
 
 function ceilDiv(a: bigint, b: bigint): bigint {
@@ -56,30 +62,32 @@ export function deriveSellCaps(intent: StrategyIntent, quotes: CapQuote[], turno
   if (!Number.isInteger(turnover) || turnover < 1) throw new Error("deriveSellCaps: turnover must be an integer >= 1");
   const t = BigInt(turnover);
   const quoteByToken = new Map(quotes.map((q) => [q.token.toLowerCase(), q]));
-  const caps = new Map<string, bigint>(); // tokenLower -> cap (base units)
+  // tokenLower -> { cap (token base units), value (budgetToken base units, ≈ disclosure) }. max-wins by cap.
+  const caps = new Map<string, { cap: bigint; value: bigint }>();
+  const put = (token: Address, cap: bigint, value: bigint) => {
+    const k = getAddress(token).toLowerCase();
+    if (cap > (caps.get(k)?.cap ?? 0n)) caps.set(k, { cap, value });
+  };
 
-  // Basket tokens: cap_i = ceil(budget × weightBps_i × turnover × amountIn_i / (10000 × amountOut_i)).
+  // Basket tokens: cap_i = ceil(budget × weightBps_i × turnover × amountIn_i / (10000 × amountOut_i)). The ≈value
+  // (budgetToken units) it represents = the allocation × turnover = budget × weightBps_i × turnover / 10000.
   for (const { token, weightBps } of intent.basket) {
     if (weightBps < 0) throw new Error("deriveSellCaps: weightBps must be >= 0");
     if (weightBps === 0) continue;
     const q = quoteByToken.get(token.toLowerCase());
     if (!q) throw new Error(`deriveSellCaps: no price snapshot for basket token ${token}`);
     const cap = ceilDiv(intent.budget * BigInt(weightBps) * t * q.amountIn, 10_000n * q.amountOut);
-    const k = getAddress(token).toLowerCase();
-    if (cap > (caps.get(k) ?? 0n)) caps.set(k, cap);
+    const value = (intent.budget * BigInt(weightBps) * t) / 10_000n;
+    put(token, cap, value);
   }
 
-  // The budget token is the source — the whole budget can rotate out of it: cap = budget × turnover (price 1).
-  // (max-wins if it is also a weighted basket member.)
-  {
-    const k = getAddress(intent.budgetToken).toLowerCase();
-    const sourceCap = intent.budget * t;
-    if (sourceCap > (caps.get(k) ?? 0n)) caps.set(k, sourceCap);
-  }
+  // The budget token is the source — the whole budget can rotate out of it: cap = budget × turnover (price 1),
+  // value = budget × turnover. (max-wins if it is also a weighted basket member.)
+  put(intent.budgetToken, intent.budget * t, intent.budget * t);
 
   return [...caps.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1)) // canonical address order (matches sortLegs in the enable)
-    .map(([token, cap]) => ({ token: getAddress(token), capBaseUnits: cap.toString() }));
+    .map(([token, { cap, value }]) => ({ token: getAddress(token), capBaseUnits: cap.toString(), valueSnapshotBaseUnits: value.toString() }));
 }
 
 /** SINGLE-SOURCE: the derived caps → the strategy session's Sell-Cap legs (the ENABLE side). */

@@ -37,6 +37,8 @@ export async function snapshotSellQuotes(
   const out: CapQuote[] = [];
   for (const token of basketTokens) {
     if (token.toLowerCase() === budgetToken.toLowerCase()) continue; // source token: price 1, no quote
+    const injected = TEST_QUOTES.get(`${chainId}:${token.toLowerCase()}`); // test-only (see __setTestQuote)
+    if (injected) { out.push({ token: getAddress(token), amountIn: injected.amountIn, amountOut: injected.amountOut }); continue; }
     const decimals = await client.readContract({ address: getAddress(token), abi: ERC20_DECIMALS_ABI, functionName: "decimals" });
     const amountIn = 10n ** BigInt(decimals); // 1 whole token_i
     const { result } = await client.simulateContract({
@@ -48,4 +50,16 @@ export async function snapshotSellQuotes(
     out.push({ token: getAddress(token), amountIn, amountOut });
   }
   return out;
+}
+
+/**
+ * TEST-ONLY: inject a fixed quote so the service-layer e2e (c12) can prepare a strategy on a testnet WITHOUT a
+ * live Uniswap pool — the deriveSellCaps formula + the QuoterV2 call path are proven separately (strategycaps.test
+ * + the simulateContract above). Hard fail-closed in prod (COPY_TEST_HOOKS=1 gate) — prod ALWAYS reads the real
+ * allowlisted quoter, so a caller can never inject a fake price to inflate a Sell-Cap.
+ */
+const TEST_QUOTES = new Map<string, { amountIn: bigint; amountOut: bigint }>();
+export function __setTestQuote(chainId: number, token: Address, amountIn: bigint, amountOut: bigint): void {
+  if (process.env.COPY_TEST_HOOKS !== "1") throw new Error("__setTestQuote is test-only (set COPY_TEST_HOOKS=1)");
+  TEST_QUOTES.set(`${chainId}:${token.toLowerCase()}`, { amountIn, amountOut });
 }
