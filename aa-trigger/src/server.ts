@@ -9,8 +9,10 @@ import { submitMirror, waitMirrorOutcome, isSessionEnabledOnChain } from "./mirr
 import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey, isAllowlistedTokenOut } from "./copyWebhook.js";
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
 import { buildDcaBuy, submitDcaBuy } from "./dcaBuild.js";
+import { defaultStrategyRegistry } from "./strategyRegistry.js";
 
 const copyRegistry = defaultRegistry();
+const strategyRegistry = defaultStrategyRegistry();
 
 /**
  * Cyppie `aa-trigger` (KAN-139) — builds/submits ERC-4337 UserOps via permissionless.js/Pimlico for the
@@ -235,6 +237,27 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       else copyRegistry.revoke(v.permissionId); // self-heal: on-chain is gone → mark revoked, exclude from the list
     }
     return send(res, 200, { follower, sessions: live });
+  }
+
+  // KAN-164 Vaults-B Active-list: the granted (active/paused) strategy sessions for an account (Strat-active rows).
+  //   GET /v1/strategy/sessions?account=0x…
+  // Mirrors the copy list: reconcile against on-chain isSessionEnabled (CONCURRENTLY, KAN-162), self-healing +
+  // fail-safe. Unblocks Dev-1's strategy-list UI. The strategy session key is backend-held (Auth ≠ Custody).
+  if (method === "GET" && url.startsWith("/v1/strategy/sessions")) {
+    const u = new URL(url, "http://localhost");
+    const account = u.searchParams.get("account");
+    if (!account) throw new BadRequest("missing account");
+    const sViews = strategyRegistry.viewByFollower(account);
+    const sChecked = await Promise.all(sViews.map(async (v) => ({
+      v,
+      enabled: await isSessionEnabledOnChain(v.chainId as 1 | 8453 | 84532, account as Address, v.permissionId).catch(() => true),
+    })));
+    const sLive: typeof sViews = [];
+    for (const { v, enabled } of sChecked) {
+      if (enabled) sLive.push(v);
+      else strategyRegistry.revoke(v.permissionId); // self-heal: on-chain gone → revoked, excluded
+    }
+    return send(res, 200, { account, sessions: sLive });
   }
 
   // KAN-157 on-chain REVOKE (non-custodial, owner-signed on-device per ADR-0009) — phase 1: build the sponsored
