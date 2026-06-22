@@ -5,6 +5,7 @@ import javax.sql.DataSource
 /** A platform profile (PRD-08 §3). The wallet address is the identity (F1 SIWE); email/displayName are
  *  optional. No key material — Auth ≠ Custody. */
 data class Profile(
+    val id: String,                 // app_user UUID — the FK used by aa_session / dca_schedule
     val walletAddress: String,
     val keycloakSub: String?,
     val email: String?,
@@ -23,7 +24,7 @@ class ProfileRepository(private val dataSource: DataSource) {
             VALUES (?, ?)
             ON CONFLICT (wallet_address)
             DO UPDATE SET keycloak_sub = EXCLUDED.keycloak_sub, updated_at = now()
-            RETURNING wallet_address, keycloak_sub, email, display_name
+            RETURNING id, wallet_address, keycloak_sub, email, display_name
         """.trimIndent()
         dataSource.connection.use { conn ->
             conn.prepareStatement(sql).use { ps ->
@@ -32,6 +33,7 @@ class ProfileRepository(private val dataSource: DataSource) {
                 ps.executeQuery().use { rs ->
                     check(rs.next()) { "upsert returned no row for $walletAddress" }
                     return Profile(
+                        id = rs.getString("id"),
                         walletAddress = rs.getString("wallet_address"),
                         keycloakSub = rs.getString("keycloak_sub"),
                         email = rs.getString("email"),

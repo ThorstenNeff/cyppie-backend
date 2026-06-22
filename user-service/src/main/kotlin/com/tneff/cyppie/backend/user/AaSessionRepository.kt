@@ -62,6 +62,27 @@ class AaSessionRepository(private val dataSource: DataSource) {
         }
     }
 
+    /** The user's sessions (newest first) — for the app's session list + the DCA scheduler's session lookup. */
+    fun listByUser(userId: String): List<AaSession> {
+        val sql = """
+            SELECT id, user_id, chain_id, account, signer, status, config::text, EXTRACT(EPOCH FROM valid_until)::bigint
+            FROM aa_session WHERE user_id = ?::uuid ORDER BY created_at DESC
+        """.trimIndent()
+        val out = ArrayList<AaSession>()
+        dataSource.connection.use { c ->
+            c.prepareStatement(sql).use { ps ->
+                ps.setString(1, userId)
+                ps.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        val vu = rs.getLong(8); val validUntil = if (rs.wasNull()) null else vu
+                        out.add(AaSession(rs.getString(1), rs.getString(2), rs.getLong(3), rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7), validUntil))
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     fun revoke(sessionId: String) = dataSource.connection.use { c ->
         c.prepareStatement("UPDATE aa_session SET status = 'revoked', updated_at = now() WHERE id = ?::uuid").use { ps ->
             ps.setString(1, sessionId)
