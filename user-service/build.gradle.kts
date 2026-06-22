@@ -49,4 +49,5 @@ kotlin {
 
 tasks.test {
     useJUnitPlatform()
+    testLogging { showStandardStreams = true } // surface e2e harness banners (DcaOrchestrationE2eTest)
 }

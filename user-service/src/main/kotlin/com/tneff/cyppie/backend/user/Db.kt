@@ -15,6 +15,7 @@ class Db(val dataSource: DataSource) {
         1 to "db/migration/V1__init.sql",
         2 to "db/migration/V2__aa_sessions.sql",
         3 to "db/migration/V3__dca_schedule.sql",
+        4 to "db/migration/V4__dca_pending_buy.sql",
     )
 
     /**
