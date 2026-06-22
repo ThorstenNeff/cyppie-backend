@@ -85,7 +85,8 @@ const signature = await owner.sign({ hash: built.digestToSign }); // raw ECDSA o
 const rv = await submitUserOp(chainCtxFor(84532), built.userOp, signature);
 const rvR = await bundler.waitForUserOperationReceipt({ hash: rv.userOpHash });
 ok(rvR.success, `REVOKE RECEIPT ${rvR.receipt.transactionHash} (blk ${rvR.receipt.blockNumber})`);
-reg.revoke(permissionId);
+// NB: deliberately do NOT off-chain-mark here — simulates the no-blind generic /v1/userop/submit revoke path
+// (KAN-157 bug): the session stays 'granted' off-chain while gone on-chain. The GET reconcile (step 5) self-heals it.
 
 // 4) confirm UNUSABLE: isSessionEnabled == false AND a USE-mode mirror now REVERTS.
 let stillEnabled = true; for (let i = 0; i < 12 && stillEnabled; i++) { stillEnabled = await isSessionEnabled({ client, account: mdAccount, permissionId }); if (stillEnabled) await new Promise((r) => setTimeout(r, 3000)); }
@@ -98,6 +99,22 @@ try {
   mirrorReverted = !postR || !postR.success;
 } catch { mirrorReverted = true; }
 ok(mirrorReverted, "post-revoke USE mirror is rejected (session unusable — no further copy)");
+
+// 5) KAN-157 (c): GET /v1/copy/sessions reconciles against on-chain isSessionEnabled → the (off-chain still
+// 'granted') but on-chain-revoked session is EXCLUDED + self-healed to revoked. Source-of-truth = on-chain.
+ok(reg.get(permissionId)?.status === "granted", "pre-reconcile: session still 'granted' off-chain (no-blind revoke path)");
+const { handle } = await import("./dist/server.js"); // its copyRegistry reads the same CYPPIE_HOME file
+const listRes = await new Promise((resolve) => {
+  const out = []; let code = 200;
+  handle(
+    { method: "GET", url: `/v1/copy/sessions?follower=${owner.address}`, headers: {}, [Symbol.asyncIterator]: async function* () {} },
+    { writeHead(c) { code = c; }, end(s) { if (s) out.push(s); resolve({ status: code, body: JSON.parse(out.join("")) }); } },
+  ).catch((e) => resolve({ status: 500, body: { error: String(e?.message ?? e) } }));
+});
+ok(listRes.status === 200, `GET /v1/copy/sessions 200 (got ${listRes.status})`);
+ok(!(listRes.body.sessions ?? []).some((s) => s.permissionId.toLowerCase() === permissionId.toLowerCase()), "revoked session reconciled OUT of the list (on-chain source-of-truth)");
+const reloaded = new CopySessionRegistry(join(home, "aa-trigger", "copy-sessions.json"));
+ok(reloaded.get(permissionId)?.status === "revoked", "self-heal PERSISTED: status flipped to revoked");
 
 console.log("\n================ KAN-157 on-chain REVOKE ================");
 console.log("enable tx     :", eR.receipt.transactionHash);

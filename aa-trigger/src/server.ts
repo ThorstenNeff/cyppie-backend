@@ -5,7 +5,7 @@ import { verifyAddressesOnChain, ENTRYPOINT_V07, SMART_SESSIONS_MODULE, CHAINS, 
 import { buildUserOp, submitUserOp, userOpReceipt, chainCtxFor, type Call, type SignedAuthorization, type SerializedUserOp } from "./userop.js";
 import { getRemoveSessionAction } from "@rhinestone/module-sdk";
 import { defaultRegistry, GateError, sessionFromRecord, type CopyScope, type CopyRecord } from "./copySession.js";
-import { submitMirror, waitMirrorOutcome } from "./mirror.js";
+import { submitMirror, waitMirrorOutcome, isSessionEnabledOnChain } from "./mirror.js";
 import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey, isAllowlistedTokenOut } from "./copyWebhook.js";
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
 
@@ -190,7 +190,17 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     const u = new URL(url, "http://localhost");
     const follower = u.searchParams.get("follower");
     if (!follower) throw new BadRequest("missing follower");
-    return send(res, 200, { follower, sessions: copyRegistry.viewByFollower(follower) });
+    // KAN-157 (c): reconcile against on-chain isSessionEnabled (source of truth) — self-healing for EVERY revoke
+    // path (no-blind generic submit / copy revoke / external removeSession / expiry). A granted session that is
+    // on-chain-disabled is dropped AND persisted as revoked (so it's a one-time read; fail-safe keeps it on RPC error).
+    const views = copyRegistry.viewByFollower(follower);
+    const live: typeof views = [];
+    for (const v of views) {
+      const enabled = await isSessionEnabledOnChain(v.chainId as 1 | 8453 | 84532, follower as Address, v.permissionId).catch(() => true);
+      if (enabled) live.push(v);
+      else copyRegistry.revoke(v.permissionId); // self-heal: on-chain is gone → mark revoked, exclude from the list
+    }
+    return send(res, 200, { follower, sessions: live });
   }
 
   // KAN-157 on-chain REVOKE (non-custodial, owner-signed on-device per ADR-0009) — phase 1: build the sponsored

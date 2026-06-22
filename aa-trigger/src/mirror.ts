@@ -3,7 +3,7 @@ import { entryPoint07Address, getUserOperationHash, createBundlerClient } from "
 import { to7702KernelSmartAccount } from "permissionless/accounts";
 import { createPimlicoClient } from "permissionless/clients/pimlico";
 import { createSmartAccountClient } from "permissionless";
-import { getOwnableValidatorMockSignature, encodeSmartSessionSignature, SmartSessionMode } from "@rhinestone/module-sdk";
+import { getOwnableValidatorMockSignature, encodeSmartSessionSignature, SmartSessionMode, isSessionEnabled, getAccount } from "@rhinestone/module-sdk";
 import { chainCtxFor, watchOwner, type Call, type ChainCtx } from "./userop.js";
 import { SPONSORSHIP_POLICY_ID } from "./config.js";
 import { buildUseModeUserOpSignature, smartSessionUseModeNonceKey, type CopyRecord } from "./copySession.js";
@@ -41,6 +41,23 @@ export async function waitMirrorOutcome(
     await new Promise((res) => setTimeout(res, delayMs));
   }
   return "pending";
+}
+
+/**
+ * KAN-157 (c): is the session still enabled ON-CHAIN? On-chain is the source of truth, so `GET /v1/copy/sessions`
+ * reconciles against this — self-healing for EVERY revoke path (no-blind generic submit, copy revoke, external/
+ * manual removeSession, expiry). FAIL-SAFE: on any RPC error return `true` (keep showing the session active —
+ * never falsely report a session as ended on a transient read failure).
+ */
+export async function isSessionEnabledOnChain(chainId: 1 | 8453 | 84532, account: Address, permissionId: Hex): Promise<boolean> {
+  try {
+    const ctx = chainCtxFor(chainId);
+    const client = createPublicClient({ chain: ctx.chain, transport: http(ctx.publicRpc) });
+    const md = getAccount({ address: account, type: "kernel" });
+    return await isSessionEnabled({ client, account: md, permissionId });
+  } catch {
+    return true; // fail-safe: uncertainty → keep active (don't drop)
+  }
 }
 
 export async function submitMirror(record: CopyRecord, signer: SessionKeySigner, calls: Call[], nonceKey = 0): Promise<{ userOpHash: Hex }> {

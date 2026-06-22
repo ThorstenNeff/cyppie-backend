@@ -42,6 +42,14 @@ and `revoked` (ended) are excluded. Response:
 ```
 Backed by `CopySessionRegistry.viewByFollower(follower)`. `createdAt` is set at `prepare`, `grantedAt` at `grant`.
 
+**On-chain reconcile (KAN-157 (c), self-healing).** On-chain is the source of truth: the list reconciles each
+granted session against `isSessionEnabled` (the C7 read). A session that is on-chain **no longer enabled** is
+excluded AND persisted as `revoked` (one-time read; subsequent calls skip it). This self-heals **every** revoke
+path — the no-blind generic `/v1/userop/submit` (which doesn't run the copy-specific off-chain mark), the copy
+`/revoke/submit`, an external/manual `removeSession`, and expiry. **Fail-safe:** on any RPC error the session is
+KEPT (never falsely reported ended on a transient read). Proven in `c7-revoke-e2e.mjs`: a session granted
+off-chain but revoked on-chain is reconciled out of the list + flipped to `revoked`.
+
 ## 2. On-chain Revoke — non-custodial, owner-signed on-device (ADR-0009)
 The permanent revoke is an **on-chain `SmartSessions.removeSession(permissionId)`** (not just an off-chain mark) —
 after it the session is gone on-chain: no further mirror is possible, and the remaining budget never moved. It is
