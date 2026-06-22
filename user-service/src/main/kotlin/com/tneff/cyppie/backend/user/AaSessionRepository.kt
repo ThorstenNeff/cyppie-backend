@@ -21,10 +21,10 @@ data class AaSession(
  * AA session registry + Q7 cross-session exposure + the global kill-switch (ADR-0024). The session-key
  * material (Copy/Vaults) lives in HSM/KMS (Ph2), never here — this is scopes + accounting.
  */
-class AaSessionRepository(private val dataSource: DataSource) {
+class AaSessionRepository(private val dataSource: DataSource) : DcaSessions, ExposureGate {
 
     // ── Kill-switch (incident response) ──────────────────────────────────────────────────────────────
-    fun isPaused(): Boolean = dataSource.connection.use { c ->
+    override fun isPaused(): Boolean = dataSource.connection.use { c ->
         c.prepareStatement("SELECT paused FROM aa_killswitch WHERE id = 1").use { ps ->
             ps.executeQuery().use { rs -> rs.next() && rs.getBoolean(1) }
         }
@@ -63,7 +63,7 @@ class AaSessionRepository(private val dataSource: DataSource) {
     }
 
     /** The user's sessions (newest first) — for the app's session list + the DCA scheduler's session lookup. */
-    fun listByUser(userId: String): List<AaSession> {
+    override fun listByUser(userId: String): List<AaSession> {
         val sql = """
             SELECT id, user_id, chain_id, account, signer, status, config::text, EXTRACT(EPOCH FROM valid_until)::bigint
             FROM aa_session WHERE user_id = ?::uuid ORDER BY created_at DESC
@@ -96,7 +96,7 @@ class AaSessionRepository(private val dataSource: DataSource) {
      * Would spending [amount] of [token] push the user's cumulative exposure over the cap? Allowed when
      * under the cap or no cap is set. Pre-check only — call [recordSpend] after a successful UserOp.
      */
-    fun withinExposureCap(userId: String, chainId: Long, token: String, amount: BigInteger): Boolean =
+    override fun withinExposureCap(userId: String, chainId: Long, token: String, amount: BigInteger): Boolean =
         dataSource.connection.use { c ->
             c.prepareStatement("SELECT spent, cap FROM aa_exposure WHERE user_id = ?::uuid AND chain_id = ? AND token = ?").use { ps ->
                 ps.setString(1, userId)

@@ -20,6 +20,11 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -27,6 +32,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import java.math.BigInteger
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
@@ -83,6 +89,38 @@ data class SessionSummary(val sessionId: String, val chainId: Long, val account:
 @Serializable
 data class SessionsResponse(val sessions: List<SessionSummary>)
 
+/**
+ * KAN-163 create a DCA schedule. The mapping decision (plan §4): the schedule stores the enabled session's
+ * `permissionId` + the swap `feeTier`/`amountOutMin`, so the scheduler has everything to build the buy. The app
+ * supplies them, having registered the session (`POST /v1/me/sessions`) and knowing its permissionId. uint256
+ * amounts ride as decimal strings. `account` MUST be the caller's own SCA.
+ */
+@Serializable
+data class CreateDcaScheduleRequest(
+    val chainId: Long, val account: String, val tokenIn: String, val tokenOut: String, val amountIn: String,
+    val router: String, val intervalSeconds: Long, val permissionId: String, val feeTier: Int,
+    val amountOutMin: String = "0",
+)
+
+@Serializable
+data class CreateDcaScheduleResponse(val scheduleId: String)
+
+/** A built, owner-unsigned buy the app fetches, raw-signs the `digestToSign` on-device, and submits. */
+@Serializable
+data class PendingBuyDto(
+    val id: String, val chainId: Long, val account: String, val tokenIn: String, val amountIn: String,
+    val userOpHash: String, val digestToSign: String,
+)
+
+@Serializable
+data class PendingBuysResponse(val pending: List<PendingBuyDto>)
+
+@Serializable
+data class SubmitBuyRequest(val signature: String)
+
+@Serializable
+data class SubmitBuyResponse(val userOpHash: String)
+
 internal data class DerivedSession(val chainId: Long, val account: String, val signer: String, val validUntil: Long?)
 
 /** Derive the indexed columns from the §2 SessionConfig (docs/aa-ph0-api-contract.md). Fail-closed on bad input. */
@@ -100,6 +138,19 @@ internal fun deriveSessionFields(config: JsonObject): DerivedSession {
         ?.mapNotNull { (it as? JsonObject)?.get("validUntil")?.jsonPrimitive?.longOrNull }
         ?.maxOrNull()
     return DerivedSession(chainId, account, signer, validUntil)
+}
+
+/** Parse a uint256 decimal string (base units); fail-closed (400) on garbage or negatives. */
+internal fun parseUint(s: String, field: String): BigInteger {
+    val v = try { BigInteger(s.trim()) } catch (_: NumberFormatException) { throw BadRequestException("$field must be a base-units integer") }
+    if (v.signum() < 0) throw BadRequestException("$field must be >= 0")
+    return v
+}
+
+internal fun parsePositiveUint(s: String, field: String): BigInteger {
+    val v = parseUint(s, field)
+    if (v.signum() <= 0) throw BadRequestException("$field must be > 0")
+    return v
 }
 
 private const val JWT_PROVIDER = "cyppie-jwt"
@@ -143,6 +194,24 @@ fun Application.userServiceModule() {
     db?.migrate()
     val profiles = db?.let { ProfileRepository(it.dataSource) }
     val sessions = db?.let { AaSessionRepository(it.dataSource) }
+    val schedules = db?.let { DcaScheduleRepository(it.dataSource) }
+    val pendingBuys = db?.let { PendingBuyRepository(it.dataSource) }
+
+    // KAN-163 DCA scheduler loop: when DB + the loopback aa-trigger are configured, tick every DCA_TICK_SECONDS —
+    // build a USE-mode buy per due schedule (gated by kill-switch/Q7) and park it for on-device signing. The loop
+    // never holds keys (Auth ≠ Custody). Absent config → no loop (the service still serves profiles/sessions).
+    val aaTriggerUrl = System.getenv("AA_TRIGGER_URL")?.takeIf { it.isNotBlank() }
+    val aaClient = aaTriggerUrl?.let { KtorAaTriggerClient(it) }
+    if (sessions != null && schedules != null && pendingBuys != null && aaClient != null) {
+        val scheduler = DcaScheduler(schedules, sessions, SubmitGate(sessions), aaClient, pendingBuys)
+        val tickSeconds = System.getenv("DCA_TICK_SECONDS")?.toLongOrNull() ?: 60L
+        launch(Dispatchers.IO) { // the tick does blocking JDBC + a blocking loopback call → IO pool, not Default
+            while (isActive) {
+                try { scheduler.tick(System.currentTimeMillis() / 1000) } catch (_: Exception) { /* never sink the loop */ }
+                delay(tickSeconds * 1000)
+            }
+        }
+    }
 
     routing {
         get("/health") { call.respond(HealthStatus("ok")) }   // liveness
@@ -197,6 +266,76 @@ fun Application.userServiceModule() {
                     val userId = profiles.upsertAndGet(address, subject).id
                     val list = sessions.listByUser(userId).map { SessionSummary(it.id, it.chainId, it.account, it.signer, it.status, it.validUntilEpoch) }
                     call.respond(SessionsResponse(list))
+                }
+
+                // KAN-163: create a recurring DCA schedule referencing an enabled session (by permissionId). The
+                // scheduler then builds buys for it. account MUST be the caller's own SCA.
+                post("/v1/me/dca/schedules") {
+                    if (profiles == null || schedules == null) {
+                        call.respond(HttpStatusCode.ServiceUnavailable, ApiError("dca store not configured")); return@post
+                    }
+                    val principal = call.principal<JWTPrincipal>()!!
+                    val subject = principal.payload.subject
+                    val address = principal.payload.getClaim("preferred_username").asString() ?: subject
+                    val r = call.receive<CreateDcaScheduleRequest>()
+                    if (!r.account.equals(address, ignoreCase = true)) throw ForbiddenException("account must be the caller's own wallet")
+                    if (!r.permissionId.matches(Regex("^0x[0-9a-fA-F]{64}$"))) throw BadRequestException("permissionId must be 0x+32 bytes")
+                    if (r.feeTier <= 0) throw BadRequestException("feeTier must be > 0")
+                    val amountIn = parsePositiveUint(r.amountIn, "amountIn")
+                    val amountOutMin = parseUint(r.amountOutMin, "amountOutMin")
+                    val userId = profiles.upsertAndGet(address, subject).id
+                    val now = System.currentTimeMillis() / 1000
+                    val id = schedules.create(
+                        userId, r.chainId, r.account, r.tokenIn, r.tokenOut, amountIn, r.router,
+                        r.intervalSeconds, now, r.permissionId, r.feeTier, amountOutMin,
+                    )
+                    call.respond(HttpStatusCode.Created, CreateDcaScheduleResponse(id))
+                }
+
+                // KAN-163: the caller's pending (built, unsigned) buys. The app raw-signs `digestToSign` on-device.
+                // The opaque userOp stays backend-side (parked) — the app never sees or rebuilds it.
+                get("/v1/me/dca/pending") {
+                    if (profiles == null || pendingBuys == null) {
+                        call.respond(HttpStatusCode.ServiceUnavailable, ApiError("dca store not configured")); return@get
+                    }
+                    val principal = call.principal<JWTPrincipal>()!!
+                    val subject = principal.payload.subject
+                    val address = principal.payload.getClaim("preferred_username").asString() ?: subject
+                    val userId = profiles.upsertAndGet(address, subject).id
+                    val list = pendingBuys.listPending(userId).map {
+                        PendingBuyDto(it.id, it.chainId, it.account, it.tokenIn, it.amountIn.toString(), it.userOpHash, it.digest)
+                    }
+                    call.respond(PendingBuysResponse(list))
+                }
+
+                // KAN-163: submit an app-signed buy. Re-gate (kill-switch may have engaged since build), relay the
+                // parked userOp + signature to aa-trigger, record the spend (Q7), mark submitted. Fail-closed.
+                post("/v1/me/dca/{id}/submit") {
+                    if (profiles == null || pendingBuys == null || sessions == null || aaClient == null) {
+                        call.respond(HttpStatusCode.ServiceUnavailable, ApiError("dca submit not configured")); return@post
+                    }
+                    val principal = call.principal<JWTPrincipal>()!!
+                    val subject = principal.payload.subject
+                    val address = principal.payload.getClaim("preferred_username").asString() ?: subject
+                    val id = call.parameters["id"] ?: throw BadRequestException("missing id")
+                    val sig = call.receive<SubmitBuyRequest>().signature
+                    if (!sig.matches(Regex("^0x[0-9a-fA-F]{130}$"))) throw BadRequestException("signature must be a 65-byte 0x hex")
+                    val userId = profiles.upsertAndGet(address, subject).id
+                    val pb = pendingBuys.getPendingForUser(id, userId) ?: throw BadRequestException("no such pending buy")
+                    when (val g = SubmitGate(sessions).check(userId, pb.chainId, pb.tokenIn, pb.amountIn)) {
+                        is GateResult.Blocked -> { pendingBuys.markFailed(pb.id); throw ForbiddenException(g.reason) }
+                        GateResult.Allowed -> {
+                            val hash = try {
+                                withContext(Dispatchers.IO) { aaClient.submitDcaBuy(pb.chainId, pb.permissionId, pb.userOp, sig) }
+                            } catch (e: Exception) {
+                                pendingBuys.markFailed(pb.id)
+                                call.respond(HttpStatusCode.BadGateway, ApiError("aa-trigger submit failed: ${e.message}")); return@post
+                            }
+                            sessions.recordSpend(userId, pb.chainId, pb.tokenIn, pb.amountIn) // Q7 cumulative
+                            pendingBuys.markSubmitted(pb.id)
+                            call.respond(SubmitBuyResponse(hash))
+                        }
+                    }
                 }
             }
         } else {
