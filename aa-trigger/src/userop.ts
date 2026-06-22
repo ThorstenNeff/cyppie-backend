@@ -117,14 +117,14 @@ const OP_BIGINT_FIELDS = [
 ] as const;
 const OP_HEX_FIELDS = ["sender", "callData", "factory", "factoryData", "paymaster", "paymasterData"] as const;
 
-function serializeOp(op: Record<string, unknown>): SerializedUserOp {
+export function serializeOp(op: Record<string, unknown>): SerializedUserOp {
   const out: SerializedUserOp = {};
   for (const f of OP_BIGINT_FIELDS) if (op[f] !== undefined) out[f] = "0x" + (op[f] as bigint).toString(16);
   for (const f of OP_HEX_FIELDS) if (op[f] !== undefined) out[f] = op[f] as string;
   return out;
 }
 
-function deserializeOp(s: SerializedUserOp): Record<string, unknown> {
+export function deserializeOp(s: SerializedUserOp): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const f of OP_BIGINT_FIELDS) if (s[f] !== undefined) out[f] = BigInt(s[f]);
   for (const f of OP_HEX_FIELDS) if (s[f] !== undefined) out[f] = s[f];

@@ -8,6 +8,7 @@ import { defaultRegistry, GateError, sessionFromRecord, type CopyScope, type Cop
 import { submitMirror, waitMirrorOutcome, isSessionEnabledOnChain } from "./mirror.js";
 import { verifyAlchemySignature, parseFollowedSpends, scaleMirror, spendKey, isAllowlistedTokenOut } from "./copyWebhook.js";
 import { buildMirrorCalls, type MirrorPlan } from "./swapAdapter.js";
+import { buildDcaBuy, submitDcaBuy } from "./dcaBuild.js";
 
 const copyRegistry = defaultRegistry();
 
@@ -132,6 +133,32 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     if (!op || !signature) throw new BadRequest("missing userOp or signature");
     const auth = body.authorization as SignedAuthorization | undefined;
     const result = await submitUserOp(chainCtxFor(chainId), op, signature, auth);
+    return send(res, 200, result);
+  }
+
+  // KAN-163 DCA recurring-buy BUILD: a USE-mode buy op through the scoped DCA Smart-Session (SwapRouter02) →
+  // returns the RAW userOpHash digest for on-device signing (Q1). The User-Service scheduler calls this for a
+  // due schedule (after its SubmitGate/Q7); the app signs `digestToSign` raw + posts /v1/dca/submit.
+  if (method === "POST" && url === "/v1/dca/build") {
+    const b = await readJson(req);
+    const chainId = requireChain(b.chainId);
+    for (const f of ["account", "permissionId", "tokenIn", "tokenOut", "amountIn", "amountOutMin", "feeTier", "router"]) {
+      if (b[f] === undefined) throw new BadRequest(`missing ${f}`);
+    }
+    const built = await buildDcaBuy(chainId as 1 | 8453 | 84532, b.account as Address, b.permissionId as Hex, {
+      router: b.router as Address, tokenIn: b.tokenIn as Address, tokenOut: b.tokenOut as Address,
+      amountIn: BigInt(b.amountIn as string), amountOutMin: BigInt(b.amountOutMin as string),
+      feeTier: Number(b.feeTier), deadline: BigInt((b.deadline as string | number | undefined) ?? Math.floor(Date.now() / 1000) + 600),
+    });
+    return send(res, 200, { permissionId: b.permissionId, ...built });
+  }
+
+  // KAN-163 DCA recurring-buy SUBMIT: the app-signed (raw-over-userOpHash) buy, wrapped USE-mode and sent.
+  if (method === "POST" && url === "/v1/dca/submit") {
+    const b = await readJson(req);
+    const chainId = requireChain(b.chainId);
+    if (!b.permissionId || !b.userOp || !b.signature) throw new BadRequest("missing permissionId, userOp or signature");
+    const result = await submitDcaBuy(chainId as 1 | 8453 | 84532, b.permissionId as Hex, b.userOp as SerializedUserOp, b.signature as Hex);
     return send(res, 200, result);
   }
 
