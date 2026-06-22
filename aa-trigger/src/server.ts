@@ -221,9 +221,16 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     // path (no-blind generic submit / copy revoke / external removeSession / expiry). A granted session that is
     // on-chain-disabled is dropped AND persisted as revoked (so it's a one-time read; fail-safe keeps it on RPC error).
     const views = copyRegistry.viewByFollower(follower);
+    // KAN-162: the per-session on-chain reads run CONCURRENTLY (was N serial RPC round-trips → ~N× latency). The
+    // reads are independent + idempotent, so Promise.all is safe; order is preserved (so `live` keeps the registry
+    // order). Self-heal (revoke on-chain-gone) + fail-safe (keep on RPC error) semantics are unchanged — the revoke
+    // mutations are applied AFTER all reads resolve, never racing concurrent reads.
+    const checked = await Promise.all(views.map(async (v) => ({
+      v,
+      enabled: await isSessionEnabledOnChain(v.chainId as 1 | 8453 | 84532, follower as Address, v.permissionId).catch(() => true),
+    })));
     const live: typeof views = [];
-    for (const v of views) {
-      const enabled = await isSessionEnabledOnChain(v.chainId as 1 | 8453 | 84532, follower as Address, v.permissionId).catch(() => true);
+    for (const { v, enabled } of checked) {
       if (enabled) live.push(v);
       else copyRegistry.revoke(v.permissionId); // self-heal: on-chain is gone → mark revoked, exclude from the list
     }
