@@ -18,6 +18,7 @@ import { createSmartAccountClient } from "permissionless";
 import { getSmartSessionsValidator, getEnableSessionsAction, isSessionEnabled, getAccount, getPermissionId, SMART_SESSIONS_ADDRESS } from "@rhinestone/module-sdk";
 import { buildStrategySession } from "./dist/strategySession.js";
 import { computeRebalanceLegs, submitRebalanceLeg } from "./dist/strategyRebalance.js";
+import { __allowTestTokenOut } from "./dist/copyWebhook.js";
 import { InMemorySessionKeySigner } from "./dist/sessionKeySigner.js";
 
 const apiKey = process.env.PIMLICO_API_KEY;
@@ -30,6 +31,10 @@ const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC 
 const WETH = "0x4200000000000000000000000000000000000006";
 const NO_CODE_ROUTER = "0x000000000000000000000000000000000000c0de"; // no-code (UR calldata bytes KAT-proven separately)
 const CAP = 10n ** 18n;
+
+// The rebalance buy-leg inherits the copy-dynamic tokenOut-allowlist (PO Vaults-B point 3). Base Sepolia WETH
+// isn't on the curated mainnet allowlist → allow it via the test hook (COPY_TEST_HOOKS=1), exactly like c8-dynamic.
+__allowTestTokenOut(84532, WETH);
 
 const owner = privateKeyToAccount(process.env.TEST_PRIVATE_KEY ?? generatePrivateKey()); // signs the enable (account owner)
 const sessionKey = new InMemorySessionKeySigner(generatePrivateKey());                    // BACKEND-held strategy session key

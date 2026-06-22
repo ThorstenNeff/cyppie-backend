@@ -1,6 +1,7 @@
 import { getAddress, type Address, type Hex } from "viem";
 import { universalRouterAdapter, type MirrorPlan } from "./swapAdapter.js";
 import { submitUseModeOp } from "./mirror.js";
+import { isAllowlistedTokenOut } from "./copyWebhook.js";
 import type { Call } from "./userop.js";
 import type { SessionKeySigner } from "./sessionKeySigner.js";
 
@@ -99,6 +100,26 @@ export interface RebalanceSwapParams {
   permit2Expiration?: number;
 }
 
+/** Fail-closed guardrail violation — the caller SKIPS the leg (never submits) on this, like the copy webhook. */
+export class RebalanceGuardError extends Error {}
+
+/**
+ * Off-chain guardrails the rebalance buy-leg INHERITS from copy-dynamic (PO Vaults-B point 3 — the practical
+ * mitigation for the advisory-output worst-case, since the on-chain policy is sell-side-only, no output constraint):
+ *  - tokenOut MUST be on the curated allowlist ({@link isAllowlistedTokenOut}, single source with copy) — else
+ *    fail-closed SKIP (a hostile/buggy drift can't buy an arbitrary token);
+ *  - a real slippage floor: `amountOutMin` is never backend-free/0 on mainnet (testnet 84532 has no MEV → 0 OK).
+ * Fail-closed: throws {@link RebalanceGuardError}; the engine skips that leg rather than submit unprotected.
+ */
+export function assertRebalanceGuardrails(chainId: number, tokenOut: Address, amountOutMin: bigint): void {
+  if (!isAllowlistedTokenOut(chainId, tokenOut)) {
+    throw new RebalanceGuardError(`rebalance tokenOut ${tokenOut} not allowlisted on chain ${chainId} — skip (fail-closed)`);
+  }
+  if (chainId !== 84532 && amountOutMin <= 0n) {
+    throw new RebalanceGuardError("rebalance requires amountOutMin > 0 on mainnet (no backend-free slippage floor)");
+  }
+}
+
 /** Build the UniversalRouter calls for one rebalance leg — the SAME 3-call shape the strategy session enables. */
 export function buildRebalanceCalls(chainId: number, router: Address, account: Address, leg: RebalanceLeg, p: RebalanceSwapParams): Call[] {
   const plan: MirrorPlan = {
@@ -116,6 +137,7 @@ export async function submitRebalanceLeg(
   chainId: 1 | 8453 | 84532, account: Address, permissionId: Hex, signer: SessionKeySigner,
   router: Address, leg: RebalanceLeg, p: RebalanceSwapParams, nonceKey = 0,
 ): Promise<{ userOpHash: Hex }> {
+  assertRebalanceGuardrails(chainId, leg.tokenOut, p.amountOutMin); // inherit copy-dynamic guardrails (fail-closed)
   const calls = buildRebalanceCalls(chainId, router, account, leg, p);
   return submitUseModeOp(chainId, account, permissionId, signer, calls, nonceKey);
 }
