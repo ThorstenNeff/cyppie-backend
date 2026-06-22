@@ -61,16 +61,26 @@ export async function isSessionEnabledOnChain(chainId: 1 | 8453 | 84532, account
 }
 
 export async function submitMirror(record: CopyRecord, signer: SessionKeySigner, calls: Call[], nonceKey = 0): Promise<{ userOpHash: Hex }> {
-  const ctx: ChainCtx = chainCtxFor(record.scope.chainId as 1 | 8453 | 84532);
-  const follower = record.scope.follower as Address;
+  return submitUseModeOp(record.scope.chainId as 1 | 8453 | 84532, record.scope.follower as Address, record.permissionId, signer, calls, nonceKey);
+}
+
+/**
+ * The shared USE-mode submit primitive (extracted from {@link submitMirror}). Builds a sponsored USE-mode op for
+ * `calls` through the smart-session on `account`, signs the RAW userOpHash with the backend session key (C3 lock),
+ * and sends it. Used by BOTH the copy mirror AND the Vaults-B strategy rebalance (KAN-164) — same proven assembly,
+ * the only difference is which session (permissionId) + which scoped calls. Auth ≠ Custody: scoped session key only.
+ */
+export async function submitUseModeOp(chainId: 1 | 8453 | 84532, account: Address, permissionId: Hex, signer: SessionKeySigner, calls: Call[], nonceKey = 0): Promise<{ userOpHash: Hex }> {
+  const ctx: ChainCtx = chainCtxFor(chainId);
+  const follower = account;
   const publicClient = createPublicClient({ chain: ctx.chain, transport: http(ctx.publicRpc) });
-  const account = await to7702KernelSmartAccount({
+  const smartAccount = await to7702KernelSmartAccount({
     client: publicClient, owner: watchOwner(follower),
     entryPoint: { address: entryPoint07Address, version: "0.7" }, version: "0.3.3",
   });
   const pimlico = createPimlicoClient({ transport: http(ctx.bundlerUrl) });
   const sac = createSmartAccountClient({
-    account, chain: ctx.chain, bundlerTransport: http(ctx.bundlerUrl),
+    account: smartAccount, chain: ctx.chain, bundlerTransport: http(ctx.bundlerUrl),
     paymaster: pimlico, paymasterContext: { sponsorshipPolicyId: SPONSORSHIP_POLICY_ID },
     userOperation: { estimateFeesPerGas: async () => (await pimlico.getUserOperationGasPrice()).fast },
   });
@@ -83,7 +93,7 @@ export async function submitMirror(record: CopyRecord, signer: SessionKeySigner,
   });
   // Explicit generous gas (skips the mock-sig estimation the session-validator would hard-revert) + sponsored
   // paymaster data via the prepare path. The USE stub is a placeholder; replaced by the real sig below.
-  const useStub = encodeSmartSessionSignature({ mode: SmartSessionMode.USE, permissionId: record.permissionId, signature: getOwnableValidatorMockSignature({ threshold: 1 }) });
+  const useStub = encodeSmartSessionSignature({ mode: SmartSessionMode.USE, permissionId, signature: getOwnableValidatorMockSignature({ threshold: 1 }) });
   const op = await sac.prepareUserOperation({
     calls, nonce,
     callGasLimit: 600_000n, verificationGasLimit: 1_500_000n, preVerificationGas: 200_000n,
@@ -91,7 +101,7 @@ export async function submitMirror(record: CopyRecord, signer: SessionKeySigner,
     signature: useStub,
   });
   const userOpHash = getUserOperationHash({ userOperation: op, entryPointAddress: entryPoint07Address, entryPointVersion: "0.7", chainId: ctx.chain.id });
-  op.signature = await buildUseModeUserOpSignature(signer, userOpHash, record.permissionId); // raw userOpHash (C3 lock)
+  op.signature = await buildUseModeUserOpSignature(signer, userOpHash, permissionId); // raw userOpHash (C3 lock)
   const submitted = await bundler.sendUserOperation({ ...op, entryPointAddress: entryPoint07Address });
   return { userOpHash: submitted };
 }
