@@ -16,9 +16,13 @@ Request: `{ chainId, account, tokenIn, tokenOut, amountIn, router, intervalSecon
 Response `201`: `{ scheduleId }`. The scheduler then builds buys for it each tick.
 
 ### `GET /v1/me/dca/pending` — fetch built, unsigned buys
-Response: `{ pending: [ { id, chainId, account, tokenIn, amountIn, userOpHash, digestToSign } ] }`.
-`digestToSign == userOpHash` (RAW). The opaque `userOp` stays backend-side (the app never sees or rebuilds it).
-App: recompute `userOpHash` from on-chain-independent inputs if desired (verifyBuyUserOp), then raw-sign `digestToSign`.
+Response: `{ pending: [ { id, chainId, account, tokenIn, amountIn, userOpHash, digestToSign, userOp } ] }`.
+`digestToSign == userOpHash` (RAW). **🔒 no-blind (PO decision (b)):** the full `userOp` (serialized v0.7 UserOperation
+object) ships so the app **recomputes** the userOpHash from it, binds its signature to that, and **scope-checks the
+calls** (Dev-1's `verifyBuyUserOp`) BEFORE signing — the app must NOT trust `digestToSign`. Rationale: the on-chain
+SmartSessions policy binds only cap+router+selector, NOT tokenOut/amount/timing, so blind-signing the digest alone
+would let a hostile backend front-load the cap into a worthless token. The app rejects if its recompute ≠ `userOpHash`
+or the decoded calls fall outside the session scope it granted.
 
 ### `POST /v1/me/dca/{id}/submit` — submit the signature
 Request: `{ signature }` (65-byte `0x` hex, raw secp256k1 over `digestToSign`).

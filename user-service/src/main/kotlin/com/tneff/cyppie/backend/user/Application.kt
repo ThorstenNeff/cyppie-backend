@@ -26,6 +26,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -105,11 +106,18 @@ data class CreateDcaScheduleRequest(
 @Serializable
 data class CreateDcaScheduleResponse(val scheduleId: String)
 
-/** A built, owner-unsigned buy the app fetches, raw-signs the `digestToSign` on-device, and submits. */
+/**
+ * A built, owner-unsigned buy the app fetches, raw-signs the `digestToSign` on-device, and submits.
+ *
+ * 🔒 no-blind (PO decision (b)): the full `userOp` ships so the app can RECOMPUTE the userOpHash from it,
+ * bind its signature to that, and scope-check the calls (Dev-1's `verifyBuyUserOp`) BEFORE signing — the
+ * on-chain policy only binds cap+router+selector, NOT tokenOut/amount/timing, so blind-signing the digest
+ * alone would let a hostile backend front-load the cap into a worthless token. The app must not trust `digestToSign`.
+ */
 @Serializable
 data class PendingBuyDto(
     val id: String, val chainId: Long, val account: String, val tokenIn: String, val amountIn: String,
-    val userOpHash: String, val digestToSign: String,
+    val userOpHash: String, val digestToSign: String, val userOp: JsonObject,
 )
 
 @Serializable
@@ -303,7 +311,10 @@ fun Application.userServiceModule() {
                     val address = principal.payload.getClaim("preferred_username").asString() ?: subject
                     val userId = profiles.upsertAndGet(address, subject).id
                     val list = pendingBuys.listPending(userId).map {
-                        PendingBuyDto(it.id, it.chainId, it.account, it.tokenIn, it.amountIn.toString(), it.userOpHash, it.digest)
+                        PendingBuyDto(
+                            it.id, it.chainId, it.account, it.tokenIn, it.amountIn.toString(), it.userOpHash, it.digest,
+                            userOp = Json.parseToJsonElement(it.userOp).jsonObject, // no-blind (b): app recomputes + scope-checks
+                        )
                     }
                     call.respond(PendingBuysResponse(list))
                 }
