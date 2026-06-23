@@ -118,9 +118,21 @@ Addresses are sourced from the audited SDKs (`@rhinestone/module-sdk`, `viem/acc
 | SpendingLimits policy | `0x000000000033212e272655d8a22402db819477a6` |
 | TimeFrame policy | `0x0000000000D30f611fA3bf652ac6879428586930` |
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
-| Uniswap QuoterV2 (84532) | `0xC5290058841028F1614F3A6F0F5816cAd0df5E27` |
 
-Common Base Sepolia tokens used in the e2e: USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, WETH
+**Uniswap V3 on Base Sepolia** — verified against the official Uniswap V3 deployment list
+([docs](https://developers.uniswap.org/contracts/v3/reference/deployments/base-deployments) +
+[raw GitHub Uniswap/docs](https://github.com/Uniswap/docs/blob/main/docs/contracts/v3/reference/deployments/Base-Deployments.md))
+and confirmed to carry on-chain code (2026-06-23):
+
+| Uniswap V3 contract (84532) | Address |
+|---|---|
+| QuoterV2 (backend `deriveSellCaps` price snapshot) | `0xC5290058841028F1614F3A6F0F5816cAd0df5E27` |
+| SwapRouter02 (DCA buy router) | `0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4` |
+| UniversalRouter (copy/strategy swap router) | `0x492E6456D9528771018DeB9E87ef7750EF184104` |
+
+These are the CANONICAL Uniswap V3 deployments — not a community fork. Use them (not hand-typed guesses) for any
+real-pool testnet run (KAN-153); the liquidity-free e2e harnesses use a no-code router + a test-injected quote and
+do not touch them. Common tokens used in the e2e: USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, WETH
 `0x4200000000000000000000000000000000000006`.
 
 **Sponsorship:** every UserOp is sent with `paymasterContext.sponsorshipPolicyId = $PIMLICO_SPONSORSHIP_POLICY_ID`
