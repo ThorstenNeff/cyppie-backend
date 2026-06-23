@@ -54,6 +54,19 @@ function requireChain(v: unknown): SupportedChainId {
 }
 
 /**
+ * KAN-174 (PRD-09 network-switching): parse the OPTIONAL `?chainId=` list filter. Absent ⇒ undefined (all nets,
+ * back-compat). A non-numeric value is rejected; the value need NOT be an enabled chain (filtering a list by a
+ * chain this host doesn't serve simply yields no rows — not an error).
+ */
+function parseChainFilter(u: URL): number | undefined {
+  const raw = u.searchParams.get("chainId");
+  if (raw == null) return undefined;
+  const id = Number(raw);
+  if (!Number.isInteger(id)) throw new BadRequest(`invalid chainId ${raw}`);
+  return id;
+}
+
+/**
  * The `amountOutMin` (slippage floor) for a mirror swap, FAIL-CLOSED. On Base Sepolia (84532, testnet, no MEV) a
  * 0 floor is acceptable for the wiring/E2E proof. On mainnet a real floor needs a quote (QuoterV2 × slippageBps)
  * — NOT yet wired — so we return `null` and the webhook SKIPS the mirror rather than submit with no slippage
@@ -220,10 +233,11 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     const u = new URL(url, "http://localhost");
     const follower = u.searchParams.get("follower");
     if (!follower) throw new BadRequest("missing follower");
+    const chainFilter = parseChainFilter(u); // KAN-174: optional ?chainId= → per-net list (avoids mixed-net rows after a switch)
     // KAN-157 (c): reconcile against on-chain isSessionEnabled (source of truth) — self-healing for EVERY revoke
     // path (no-blind generic submit / copy revoke / external removeSession / expiry). A granted session that is
     // on-chain-disabled is dropped AND persisted as revoked (so it's a one-time read; fail-safe keeps it on RPC error).
-    const views = copyRegistry.viewByFollower(follower);
+    const views = copyRegistry.viewByFollower(follower).filter((v) => chainFilter === undefined || v.chainId === chainFilter);
     // KAN-162: the per-session on-chain reads run CONCURRENTLY (was N serial RPC round-trips → ~N× latency). The
     // reads are independent + idempotent, so Promise.all is safe; order is preserved (so `live` keeps the registry
     // order). Self-heal (revoke on-chain-gone) + fail-safe (keep on RPC error) semantics are unchanged — the revoke
@@ -248,7 +262,8 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     const u = new URL(url, "http://localhost");
     const account = u.searchParams.get("account");
     if (!account) throw new BadRequest("missing account");
-    const sViews = strategyRegistry.viewByFollower(account);
+    const sChainFilter = parseChainFilter(u); // KAN-174: optional ?chainId= per-net filter
+    const sViews = strategyRegistry.viewByFollower(account).filter((v) => sChainFilter === undefined || v.chainId === sChainFilter);
     const sChecked = await Promise.all(sViews.map(async (v) => ({
       v,
       enabled: await isSessionEnabledOnChain(v.chainId as 1 | 8453 | 84532, account as Address, v.permissionId).catch(() => true),

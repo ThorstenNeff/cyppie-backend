@@ -272,7 +272,13 @@ fun Application.userServiceModule() {
                     val subject = principal.payload.subject
                     val address = principal.payload.getClaim("preferred_username").asString() ?: subject
                     val userId = profiles.upsertAndGet(address, subject).id
-                    val list = sessions.listByUser(userId).map { SessionSummary(it.id, it.chainId, it.account, it.signer, it.status, it.validUntilEpoch) }
+                    // KAN-174 (PRD-09 network-switching): optional ?chainId= per-net filter (else mixed-net rows after a switch).
+                    val chainFilter = call.request.queryParameters["chainId"]?.let {
+                        it.toLongOrNull() ?: throw BadRequestException("invalid chainId $it")
+                    }
+                    val list = sessions.listByUser(userId)
+                        .filter { chainFilter == null || it.chainId == chainFilter }
+                        .map { SessionSummary(it.id, it.chainId, it.account, it.signer, it.status, it.validUntilEpoch) }
                     call.respond(SessionsResponse(list))
                 }
 
